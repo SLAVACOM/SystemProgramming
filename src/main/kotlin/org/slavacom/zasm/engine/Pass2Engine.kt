@@ -11,17 +11,26 @@ import org.slavacom.zasm.model.toHex2
 import org.slavacom.zasm.model.toHex4
 import org.slavacom.zasm.model.toHex8
 
-/** Результат второго прохода. */
+/**
+ * Результат второго прохода.
+ * [relocationTable] — адреса команд с прямой адресацией символьного операнда
+ * ([InstructionFormat.REG_ADDR]/[InstructionFormat.ADDR_ONLY]): их операнд —
+ * абсолютный адрес, зашитый в код, и должен быть скорректирован при загрузке
+ * модуля по другому адресу. Относительная адресация (`REG_OFFSET`) самонастраивающаяся
+ * и в таблицу не попадает; `REG_REG` адресов не содержит.
+ */
 data class Pass2Result(
     val header: ObjectHeader,
     val binaryLines: List<String>,
+    val relocationTable: List<Int>,
     val errors: List<AssemblerError>,
 )
 
 /**
  * Второй проход: довершает частично сгенерированные командные строки
  * вспомогательной таблицы — разрешает символический операнд (адрес или
- * смещение) и дописывает уже готовые регистровые байты из [Pass1Engine].
+ * смещение), дописывает уже готовые регистровые байты из [Pass1Engine] и
+ * формирует таблицу настройки для прямой адресации.
  *
  * Формат команды строго один из четырёх [InstructionFormat]; изменение
  * кодов/длин в редактируемой ТКО поддерживается, добавление принципиально
@@ -36,11 +45,12 @@ object Pass2Engine {
     private class Runner(private val pass1: Pass1Result, private val opcodes: List<OpcodeEntry>) {
         private val errors = mutableListOf<AssemblerError>()
         private val binaryLines = mutableListOf<String>()
+        private val relocationTable = mutableListOf<Int>()
 
         fun execute(): Pass2Result {
             pass1.auxTable.forEach { row -> processRow(row) }
             val header = ObjectHeader(pass1.programName, pass1.programLength, pass1.loadAddress)
-            return Pass2Result(header, binaryLines, errors)
+            return Pass2Result(header, binaryLines, relocationTable, errors)
         }
 
         private fun processRow(row: AuxTableRow) {
@@ -94,6 +104,7 @@ object Pass2Engine {
             return when (format) {
                 InstructionFormat.REG_ADDR -> {
                     val target = resolve(row.operand2, row.sourceLine) ?: return null
+                    relocationTable += row.address // прямая адресация — нужна настройка при загрузке
                     parts += row.operand1 // уже hex-байт регистра, закодирован на первом проходе
                     parts += toHex8(target)
                     parts.joinToString(" ")
@@ -108,6 +119,7 @@ object Pass2Engine {
 
                 InstructionFormat.ADDR_ONLY -> {
                     val target = resolve(row.operand1, row.sourceLine) ?: return null
+                    relocationTable += row.address // прямая адресация — нужна настройка при загрузке
                     parts += toHex8(target)
                     parts.joinToString(" ")
                 }

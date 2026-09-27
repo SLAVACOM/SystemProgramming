@@ -31,14 +31,16 @@ import org.slavacom.zasm.model.parseSourceText
 import org.slavacom.zasm.model.toHex8
 import org.slavacom.zasm.samples.AssemblerSample
 import org.slavacom.zasm.samples.Stage1Samples
+import org.slavacom.zasm.samples.Stage2Samples
 
 private const val PANEL_WIDTH = 380.0
 private const val SOURCE_EXTRA_ROWS = 6
 private const val OPCODE_EXTRA_ROWS = 4
 
 /**
- * Этап 1: простейший ассемблер в абсолютном формате — проход 1 и проход 2
- * подключены к движку из пакета `engine`.
+ * Этапы 1-2: ассемблер в перемещаемом формате — проход 1 и проход 2
+ * подключены к движку из пакета `engine`, плюс таблица настройки для команд
+ * прямой адресации.
  */
 class MainApp : Application() {
 
@@ -57,6 +59,7 @@ class MainApp : Application() {
     private lateinit var errors1List: ListView<String>
 
     private lateinit var headerGrid: StringGrid
+    private lateinit var relocationList: ListView<String>
     private lateinit var binaryCodeList: ListView<String>
     private lateinit var errors2List: ListView<String>
 
@@ -70,7 +73,7 @@ class MainApp : Application() {
         val scene = Scene(root, 1300.0, 780.0)
         scene.stylesheets.add(javaClass.getResource("/zasm.css")!!.toExternalForm())
 
-        stage.title = "Zasm 1.0 — Двухпросмотровый ассемблер в абсолютном формате"
+        stage.title = "Zasm 2.0 — Двухпросмотровый ассемблер в перемещаемом формате"
         stage.scene = scene
         stage.show()
     }
@@ -87,6 +90,7 @@ class MainApp : Application() {
 
         exampleBox = ComboBox<AssemblerSample>().apply {
             items.addAll(Stage1Samples.all)
+            items.addAll(Stage2Samples.all)
             selectionModel.selectFirst()
             setOnAction { selectionModel.selectedItem?.let { loadSample(it) } }
         }
@@ -177,15 +181,18 @@ class MainApp : Application() {
 
     private fun buildObjectPanel(): VBox {
         headerGrid = StringGrid(listOf("Имя", "Длина", "Адрес загрузки"), rowCount = 1)
+        relocationList = ListView()
         binaryCodeList = ListView()
         errors2List = ListView()
 
+        VBox.setVgrow(relocationList, Priority.SOMETIMES)
         VBox.setVgrow(binaryCodeList, Priority.ALWAYS)
         VBox.setVgrow(errors2List, Priority.SOMETIMES)
 
         return VBox(
             8.0,
             Label("Заголовок объектного модуля"), headerGrid,
+            Label("Таблица настройки"), relocationList,
             Label("Двоичный код"), binaryCodeList,
             Label("Ошибки второго прохода"), errors2List,
         ).apply {
@@ -260,6 +267,7 @@ class MainApp : Application() {
         symbolGrid.clearDataRows(0)
         errors1List.items.clear()
         headerGrid.clearDataRows(1)
+        relocationList.items.clear()
         binaryCodeList.items.clear()
         errors2List.items.clear()
         secondPassButton.isDisable = true
@@ -299,6 +307,7 @@ class MainApp : Application() {
         errors1List.items.setAll(result.errors.map { it.toString() })
 
         headerGrid.clearDataRows(1)
+        relocationList.items.clear()
         binaryCodeList.items.clear()
         errors2List.items.clear()
 
@@ -311,6 +320,7 @@ class MainApp : Application() {
         headerGrid.loadRows(
             listOf(listOf(result.header.name, toHex8(result.header.length), toHex8(result.header.loadAddress))),
         )
+        relocationList.items.setAll(result.relocationTable.map { toHex8(it) })
         binaryCodeList.items.setAll(result.binaryLines)
         errors2List.items.setAll(result.errors.map { it.toString() })
     }

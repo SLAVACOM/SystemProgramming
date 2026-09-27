@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.slavacom.zasm.model.DefaultOpcodeTable
 import org.slavacom.zasm.samples.Stage1Samples
+import org.slavacom.zasm.samples.Stage2Samples
 
 class Pass2EngineTest {
 
@@ -34,6 +35,9 @@ class Pass2EngineTest {
             ),
             pass2.binaryLines,
         )
+
+        // прямая адресация (LD, LD, SAV, JUMP) — все 4 попадают в таблицу настройки, ADD (рег+рег) — нет
+        assertEquals(listOf(0x1000, 0x1006, 0x100F, 0x1015), pass2.relocationTable)
     }
 
     @Test
@@ -73,5 +77,43 @@ class Pass2EngineTest {
 
         assertTrue(pass2.errors.isEmpty(), "неожиданные ошибки: ${pass2.errors}")
         assertEquals(listOf("07 01 02"), pass2.binaryLines)
+    }
+
+    @Test
+    fun `only-direct sample fills the relocation table for every instruction`() {
+        val pass1 = Pass1Engine.run(Stage2Samples.onlyDirect.lines, opcodes, loadAddress = 0x1000)
+        assertTrue(pass1.errors.isEmpty(), "неожиданные ошибки: ${pass1.errors}")
+
+        val pass2 = Pass2Engine.run(pass1, opcodes)
+
+        assertTrue(pass2.errors.isEmpty(), "неожиданные ошибки: ${pass2.errors}")
+        // LD, SAV, CALL, JUMP, SAV, JUMP — все прямой адресации, все попадают в таблицу настройки
+        assertEquals(
+            listOf(0x1000, 0x1006, 0x100C, 0x1011, 0x1016, 0x101C),
+            pass2.relocationTable,
+        )
+    }
+
+    @Test
+    fun `only-relative sample leaves the relocation table empty`() {
+        val pass1 = Pass1Engine.run(Stage2Samples.onlyRelative.lines, opcodes, loadAddress = 0x1000)
+        assertTrue(pass1.errors.isEmpty(), "неожиданные ошибки: ${pass1.errors}")
+
+        val pass2 = Pass2Engine.run(pass1, opcodes)
+
+        assertTrue(pass2.errors.isEmpty(), "неожиданные ошибки: ${pass2.errors}")
+        assertTrue(pass2.relocationTable.isEmpty(), "таблица настройки должна быть пуста: ${pass2.relocationTable}")
+    }
+
+    @Test
+    fun `mixed sample puts only the direct-addressing instructions in the relocation table`() {
+        val pass1 = Pass1Engine.run(Stage2Samples.mixed.lines, opcodes, loadAddress = 0x1000)
+        assertTrue(pass1.errors.isEmpty(), "неожиданные ошибки: ${pass1.errors}")
+
+        val pass2 = Pass2Engine.run(pass1, opcodes)
+
+        assertTrue(pass2.errors.isEmpty(), "неожиданные ошибки: ${pass2.errors}")
+        // LD (прямая) и JUMP (прямая) — в таблице; LDN/SAVN (относительная) и ADD (рег+рег) — нет
+        assertEquals(listOf(0x1000, 0x1011), pass2.relocationTable)
     }
 }
