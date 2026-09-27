@@ -7,6 +7,7 @@ import org.slavacom.zasm.model.DefaultOpcodeTable
 import org.slavacom.zasm.model.SourceLine
 import org.slavacom.zasm.model.instructionFormatOf
 import org.slavacom.zasm.samples.Stage1Samples
+import org.slavacom.zasm.samples.Stage3Samples
 
 class Pass1EngineTest {
 
@@ -80,5 +81,44 @@ class Pass1EngineTest {
         assertEquals(1, result.errors.size, "ошибки: ${result.errors}")
         assertTrue(result.errors.single().message.contains("ADD"))
         assertTrue(result.symbolTable.none { it.name == "ADD" })
+    }
+
+    @Test
+    fun `reference sample marks EXTDEF names as external and collects EXTREF names`() {
+        val result = Pass1Engine.run(Stage3Samples.reference.lines, opcodes, loadAddress = 0x0)
+
+        assertTrue(result.errors.isEmpty(), "неожиданные ошибки: ${result.errors}")
+        assertEquals(listOf("Str2"), result.externalRefs)
+
+        val externalFlags = result.symbolTable.associate { it.name to it.isExternal }
+        assertEquals(
+            mapOf("Proc" to false, "Str1" to true, "Str3" to false, "Rez" to false, "buf" to true),
+            externalFlags,
+        )
+    }
+
+    @Test
+    fun `withErrors sample reports EXTDEF name never defined by a label`() {
+        val result = Pass1Engine.run(Stage3Samples.withErrors.lines, opcodes, loadAddress = 0x1000)
+
+        assertEquals(1, result.errors.size, "ошибки: ${result.errors}")
+        assertTrue(result.errors.single().message.contains("Ghost"))
+        assertEquals(listOf("Other"), result.externalRefs)
+    }
+
+    @Test
+    fun `name declared both EXTDEF and EXTREF is rejected`() {
+        val source = listOf(
+            SourceLine("Exampl", "Start", "00001000", ""),
+            SourceLine("", "EXTDEF", "Shared", ""),
+            SourceLine("", "EXTREF", "Shared", ""),
+            SourceLine("Shared", "WORD", "1", ""),
+            SourceLine("", "End", "", ""),
+        )
+
+        val result = Pass1Engine.run(source, opcodes, loadAddress = 0x1000)
+
+        assertEquals(1, result.errors.size, "ошибки: ${result.errors}")
+        assertTrue(result.errors.single().message.contains("Shared"))
     }
 }

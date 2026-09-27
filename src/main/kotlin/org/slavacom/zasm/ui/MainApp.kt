@@ -20,8 +20,10 @@ import javafx.scene.layout.Priority
 import javafx.scene.layout.Region
 import javafx.scene.layout.VBox
 import javafx.scene.text.Font
+import javafx.stage.FileChooser
 import javafx.stage.Stage
 import org.slavacom.zasm.engine.AssemblerEngine
+import org.slavacom.zasm.io.ObjectFileWriter
 import org.slavacom.zasm.model.DefaultOpcodeTable
 import org.slavacom.zasm.model.OpcodeEntry
 import org.slavacom.zasm.model.SourceLine
@@ -32,6 +34,7 @@ import org.slavacom.zasm.model.toHex8
 import org.slavacom.zasm.samples.AssemblerSample
 import org.slavacom.zasm.samples.Stage1Samples
 import org.slavacom.zasm.samples.Stage2Samples
+import org.slavacom.zasm.samples.Stage3Samples
 
 private const val PANEL_WIDTH = 380.0
 private const val SOURCE_EXTRA_ROWS = 6
@@ -59,8 +62,11 @@ class MainApp : Application() {
     private lateinit var errors1List: ListView<String>
 
     private lateinit var headerGrid: StringGrid
-    private lateinit var relocationList: ListView<String>
+    private lateinit var relocationGrid: StringGrid
+    private lateinit var externalNamesGrid: StringGrid
+    private lateinit var externalRefsList: ListView<String>
     private lateinit var binaryCodeList: ListView<String>
+    private lateinit var saveButton: Button
     private lateinit var errors2List: ListView<String>
 
     override fun start(stage: Stage) {
@@ -73,7 +79,7 @@ class MainApp : Application() {
         val scene = Scene(root, 1300.0, 780.0)
         scene.stylesheets.add(javaClass.getResource("/zasm.css")!!.toExternalForm())
 
-        stage.title = "Zasm 2.0 — Двухпросмотровый ассемблер в перемещаемом формате"
+        stage.title = "Zasm 3.0 — Двухпросмотровый ассемблер в полном перемещаемом формате"
         stage.scene = scene
         stage.show()
     }
@@ -91,6 +97,7 @@ class MainApp : Application() {
         exampleBox = ComboBox<AssemblerSample>().apply {
             items.addAll(Stage1Samples.all)
             items.addAll(Stage2Samples.all)
+            items.addAll(Stage3Samples.all)
             selectionModel.selectFirst()
             setOnAction { selectionModel.selectedItem?.let { loadSample(it) } }
         }
@@ -161,7 +168,7 @@ class MainApp : Application() {
 
     private fun buildMiddlePanel(): VBox {
         auxGrid = StringGrid(listOf("Адрес", "Код", "Операнд 1", "Операнд 2"), rowCount = 0)
-        symbolGrid = StringGrid(listOf("Имя", "Адрес"), rowCount = 0)
+        symbolGrid = StringGrid(listOf("Имя", "Адрес", "Внешнее имя"), rowCount = 0)
         errors1List = ListView()
 
         VBox.setVgrow(auxGrid, Priority.ALWAYS)
@@ -181,19 +188,30 @@ class MainApp : Application() {
 
     private fun buildObjectPanel(): VBox {
         headerGrid = StringGrid(listOf("Имя", "Длина", "Адрес загрузки"), rowCount = 1)
-        relocationList = ListView()
+        relocationGrid = StringGrid(listOf("Адрес команды", "Имя внешней ссылки"), rowCount = 0)
+        externalNamesGrid = StringGrid(listOf("Адрес", "Имя"), rowCount = 0)
+        externalRefsList = ListView()
         binaryCodeList = ListView()
+        saveButton = Button("Сохранить…").apply {
+            isDisable = true
+            setOnAction { onSave() }
+        }
         errors2List = ListView()
 
-        VBox.setVgrow(relocationList, Priority.SOMETIMES)
+        VBox.setVgrow(relocationGrid, Priority.SOMETIMES)
+        VBox.setVgrow(externalNamesGrid, Priority.SOMETIMES)
+        VBox.setVgrow(externalRefsList, Priority.SOMETIMES)
         VBox.setVgrow(binaryCodeList, Priority.ALWAYS)
         VBox.setVgrow(errors2List, Priority.SOMETIMES)
 
         return VBox(
             8.0,
             Label("Заголовок объектного модуля"), headerGrid,
-            Label("Таблица настройки"), relocationList,
+            Label("Таблица настройки"), relocationGrid,
+            Label("Внешние имена"), externalNamesGrid,
+            Label("Внешние ссылки"), externalRefsList,
             Label("Двоичный код"), binaryCodeList,
+            saveButton,
             Label("Ошибки второго прохода"), errors2List,
         ).apply {
             padding = Insets(4.0)
@@ -267,10 +285,13 @@ class MainApp : Application() {
         symbolGrid.clearDataRows(0)
         errors1List.items.clear()
         headerGrid.clearDataRows(1)
-        relocationList.items.clear()
+        relocationGrid.clearDataRows(0)
+        externalNamesGrid.clearDataRows(0)
+        externalRefsList.items.clear()
         binaryCodeList.items.clear()
         errors2List.items.clear()
         secondPassButton.isDisable = true
+        saveButton.isDisable = true
     }
 
     private fun readSource(): List<SourceLine> =
@@ -303,13 +324,18 @@ class MainApp : Application() {
         val result = engine.runPass1(readSource(), readOpcodes(), loadAddress)
 
         auxGrid.loadRows(result.auxTable.map { listOf(toHex8(it.address), it.opText, it.operand1, it.operand2) })
-        symbolGrid.loadRows(result.symbolTable.map { listOf(it.name, toHex8(it.address)) })
+        symbolGrid.loadRows(
+            result.symbolTable.map { listOf(it.name, toHex8(it.address), if (it.isExternal) "1" else "0") },
+        )
+        externalRefsList.items.setAll(result.externalRefs)
         errors1List.items.setAll(result.errors.map { it.toString() })
 
         headerGrid.clearDataRows(1)
-        relocationList.items.clear()
+        relocationGrid.clearDataRows(0)
+        externalNamesGrid.clearDataRows(0)
         binaryCodeList.items.clear()
         errors2List.items.clear()
+        saveButton.isDisable = true
 
         secondPassButton.isDisable = result.errors.isNotEmpty()
     }
@@ -320,9 +346,22 @@ class MainApp : Application() {
         headerGrid.loadRows(
             listOf(listOf(result.header.name, toHex8(result.header.length), toHex8(result.header.loadAddress))),
         )
-        relocationList.items.setAll(result.relocationTable.map { toHex8(it) })
+        relocationGrid.loadRows(result.relocationTable.map { listOf(toHex8(it.address), it.externalName ?: "") })
+        externalNamesGrid.loadRows(result.externalNames.map { listOf(toHex8(it.address), it.name) })
         binaryCodeList.items.setAll(result.binaryLines)
         errors2List.items.setAll(result.errors.map { it.toString() })
+        saveButton.isDisable = result.errors.isNotEmpty()
+    }
+
+    private fun onSave() {
+        val (pass1, pass2) = engine.currentResults() ?: return
+        val fileChooser = FileChooser().apply {
+            title = "Сохранить объектный модуль"
+            extensionFilters.add(FileChooser.ExtensionFilter("Объектный модуль (*.obj)", "*.obj"))
+            initialFileName = "${pass1.programName}.obj"
+        }
+        val file = fileChooser.showSaveDialog(saveButton.scene?.window) ?: return
+        file.writeText(ObjectFileWriter.format(pass1, pass2))
     }
 }
 

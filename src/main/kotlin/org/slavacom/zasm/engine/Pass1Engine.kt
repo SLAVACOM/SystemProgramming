@@ -17,6 +17,7 @@ data class Pass1Result(
     val programLength: Int,
     val auxTable: List<AuxTableRow>,
     val symbolTable: List<SymbolTableEntry>,
+    val externalRefs: List<String>,
     val errors: List<AssemblerError>,
 )
 
@@ -26,6 +27,12 @@ data class Pass1Result(
  * и кодируются в hex уже здесь; символический адрес/смещение остаётся
  * неразрешённым текстом (именем), это довершает [Pass2Engine], когда
  * построена полная ТСИ.
+ *
+ * Раздельное ассемблирование (Этап 3): `EXTDEF name1 [name2]` помечает
+ * локально определяемые (меткой) имена как экспортируемые
+ * ([SymbolTableEntry.isExternal]); `EXTREF name1 [name2]` объявляет имена,
+ * определённые в ДРУГИХ модулях — такие операнды не считаются ошибкой
+ * «не определено» ни здесь, ни в [Pass2Engine].
  */
 object Pass1Engine {
 
@@ -33,7 +40,9 @@ object Pass1Engine {
     private const val PSEUDO_END = "END"
     private const val PSEUDO_WORD = "WORD"
     private const val PSEUDO_BYTE = "BYTE"
-    private val PSEUDO_OPS = setOf(PSEUDO_START, PSEUDO_END, PSEUDO_WORD, PSEUDO_BYTE)
+    private const val PSEUDO_EXTDEF = "EXTDEF"
+    private const val PSEUDO_EXTREF = "EXTREF"
+    private val PSEUDO_OPS = setOf(PSEUDO_START, PSEUDO_END, PSEUDO_WORD, PSEUDO_BYTE, PSEUDO_EXTDEF, PSEUDO_EXTREF)
 
     fun run(source: List<SourceLine>, opcodes: List<OpcodeEntry>, loadAddress: Int): Pass1Result {
         val auxTable = mutableListOf<AuxTableRow>()
@@ -41,6 +50,17 @@ object Pass1Engine {
         val errors = mutableListOf<AssemblerError>()
         val knownNames = mutableSetOf<String>()
         val reservedNames = PSEUDO_OPS + opcodes.map { it.mnemonic.uppercase() }
+
+        val externalDefs = collectExternalNames(source, PSEUDO_EXTDEF)
+        val externalRefDecls = collectExternalNames(source, PSEUDO_EXTREF)
+        val externalRefs = externalRefDecls.map { it.first }
+        val externalDefNamesUpper = externalDefs.map { it.first.uppercase() }.toSet()
+        val externalRefNamesUpper = externalRefs.map { it.uppercase() }.toSet()
+
+        externalDefNamesUpper.intersect(externalRefNamesUpper).forEach { clashUpper ->
+            val original = externalDefs.first { it.first.uppercase() == clashUpper }.first
+            errors += AssemblerError(0, "имя '$original' объявлено одновременно как EXTDEF и EXTREF")
+        }
 
         var address = loadAddress
         var programName = ""
@@ -57,7 +77,7 @@ object Pass1Engine {
                 errors += AssemblerError(lineNo, "повторное определение имени '$name'")
                 return
             }
-            symbolTable += SymbolTableEntry(name, atAddress)
+            symbolTable += SymbolTableEntry(name, atAddress, isExternal = name.uppercase() in externalDefNamesUpper)
         }
 
         fun encodeRegister(operand: String, lineNo: Int): String {
@@ -85,6 +105,19 @@ object Pass1Engine {
 
                 op.equals(PSEUDO_END, ignoreCase = true) -> {
                     sawEnd = true
+                }
+
+                op.equals(PSEUDO_EXTDEF, ignoreCase = true) -> {
+                    if (line.operand1.isBlank()) {
+                        errors += AssemblerError(lineNo, "не указаны имена для EXTDEF")
+                    }
+                    // сами имена уже собраны заранее (collectExternalNames); адрес не резервирует
+                }
+
+                op.equals(PSEUDO_EXTREF, ignoreCase = true) -> {
+                    if (line.operand1.isBlank()) {
+                        errors += AssemblerError(lineNo, "не указаны имена для EXTREF")
+                    }
                 }
 
                 op.equals(PSEUDO_WORD, ignoreCase = true) -> {
@@ -137,13 +170,39 @@ object Pass1Engine {
             errors += AssemblerError(0, "не найдена директива Start")
         }
 
+        externalDefs.forEach { (name, lineNo) ->
+            if (symbolTable.none { it.name.equals(name, ignoreCase = true) }) {
+                errors += AssemblerError(lineNo, "внешнее имя '$name' (EXTDEF) не определено меткой в этом модуле")
+            }
+        }
+
         return Pass1Result(
             programName = programName.ifBlank { "NONAME" },
             loadAddress = loadAddress,
             programLength = address - loadAddress,
             auxTable = auxTable,
             symbolTable = symbolTable,
+            externalRefs = externalRefs,
             errors = errors,
         )
+    }
+
+    /**
+     * Собирает уникальные имена (с сохранением исходного написания и номера
+     * строки первого упоминания) из операндов строк с указанной псевдокомандой
+     * (`EXTDEF`/`EXTREF`), которых может быть до двух на строку.
+     */
+    private fun collectExternalNames(source: List<SourceLine>, pseudo: String): List<Pair<String, Int>> {
+        val seen = mutableSetOf<String>()
+        val result = mutableListOf<Pair<String, Int>>()
+        source.forEachIndexed { index, line ->
+            if (!line.op.trim().equals(pseudo, ignoreCase = true)) return@forEachIndexed
+            listOf(line.operand1.trim(), line.operand2.trim()).forEach { name ->
+                if (name.isNotBlank() && seen.add(name.uppercase())) {
+                    result += name to (index + 1)
+                }
+            }
+        }
+        return result
     }
 }
