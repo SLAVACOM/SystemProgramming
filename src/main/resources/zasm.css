@@ -1,0 +1,4 @@
+.zasm-grid .table-row-cell {
+    /* Аналог DefaultRowHeight=15 из методички, немного увеличено под шрифт JavaFX по умолчанию */
+    -fx-cell-size: 22px;
+}
