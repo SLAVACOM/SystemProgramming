@@ -15,21 +15,49 @@ import javafx.scene.layout.Priority
 import javafx.scene.layout.Region
 import javafx.scene.layout.VBox
 import javafx.stage.Stage
+import org.slavacom.zasm.engine.AssemblerEngine
 import org.slavacom.zasm.model.DefaultOpcodeTable
+import org.slavacom.zasm.model.OpcodeEntry
+import org.slavacom.zasm.model.SourceLine
+import org.slavacom.zasm.model.parseHex
+import org.slavacom.zasm.model.toHex8
+import org.slavacom.zasm.samples.AssemblerSample
+import org.slavacom.zasm.samples.Stage1Samples
 
-private const val DEFAULT_LOAD_ADDRESS = "00001000"
 private const val PANEL_WIDTH = 380.0
+private const val SOURCE_EXTRA_ROWS = 6
+private const val OPCODE_EXTRA_ROWS = 4
 
 /**
- * Этап 0: пустой каркас формы — три панели с сетками, без логики проходов.
- * Разметка соответствует Шагу 1 Этапа 1 методички (см. docs/labs/img_2.jpg).
+ * Этап 1: простейший ассемблер в абсолютном формате — проход 1 и проход 2
+ * подключены к движку из пакета `engine`.
  */
 class MainApp : Application() {
+
+    private val engine = AssemblerEngine()
+
+    private lateinit var firstPassButton: Button
+    private lateinit var secondPassButton: Button
+    private lateinit var exampleBox: ComboBox<AssemblerSample>
+
+    private lateinit var sourceGrid: StringGrid
+    private lateinit var loadAddressField: TextField
+    private lateinit var opcodeGrid: StringGrid
+
+    private lateinit var auxGrid: StringGrid
+    private lateinit var symbolGrid: StringGrid
+    private lateinit var errors1List: ListView<String>
+
+    private lateinit var headerGrid: StringGrid
+    private lateinit var binaryCodeList: ListView<String>
+    private lateinit var errors2List: ListView<String>
 
     override fun start(stage: Stage) {
         val root = BorderPane()
         root.top = buildToolbar()
         root.center = buildPanels()
+
+        loadSample(Stage1Samples.default)
 
         val scene = Scene(root, 1300.0, 780.0)
         scene.stylesheets.add(javaClass.getResource("/zasm.css")!!.toExternalForm())
@@ -39,20 +67,29 @@ class MainApp : Application() {
         stage.show()
     }
 
+    // ---------------------------------------------------------------- toolbar
+
     private fun buildToolbar(): HBox {
-        val firstPass = Button("Первый проход")
-        val secondPass = Button("Второй проход").apply { isDisable = true }
+        firstPassButton = Button("Первый проход").apply { setOnAction { onFirstPass() } }
+        secondPassButton = Button("Второй проход").apply {
+            isDisable = true
+            setOnAction { onSecondPass() }
+        }
         val spacer = Region().apply { HBox.setHgrow(this, Priority.ALWAYS) }
-        val exampleBox = ComboBox<String>().apply {
-            items.addAll("по умолчанию (без ошибок)")
+
+        exampleBox = ComboBox<AssemblerSample>().apply {
+            items.addAll(Stage1Samples.all)
             selectionModel.selectFirst()
+            setOnAction { selectionModel.selectedItem?.let { loadSample(it) } }
         }
 
-        return HBox(10.0, firstPass, secondPass, spacer, Label("Выбор примера:"), exampleBox).apply {
+        return HBox(10.0, firstPassButton, secondPassButton, spacer, Label("Выбор примера:"), exampleBox).apply {
             padding = Insets(8.0)
             alignment = Pos.CENTER_LEFT
         }
     }
+
+    // ----------------------------------------------------------------- panels
 
     private fun buildPanels(): HBox {
         val left = buildSourcePanel()
@@ -68,28 +105,27 @@ class MainApp : Application() {
     }
 
     private fun buildSourcePanel(): VBox {
-        val sourceGrid = StringGrid(
+        sourceGrid = StringGrid(
             columnTitles = listOf("Метка", "Операция", "Операнд 1", "Операнд 2"),
-            rowCount = 16,
+            rowCount = 1,
             editable = true,
         )
         VBox.setVgrow(sourceGrid, Priority.ALWAYS)
 
-        val loadAddressField = TextField(DEFAULT_LOAD_ADDRESS)
+        loadAddressField = TextField()
         val loadAddressBox = HBox(8.0, Label("Адрес загрузки:"), loadAddressField).apply {
             alignment = Pos.CENTER_LEFT
         }
 
-        val opcodeGrid = StringGrid(
+        opcodeGrid = StringGrid(
             columnTitles = listOf("Мнемоника", "Код", "Длина"),
-            rowCount = DefaultOpcodeTable.entries.size,
+            rowCount = 1,
             editable = true,
         )
-        DefaultOpcodeTable.entries.forEachIndexed { row, entry ->
-            opcodeGrid.setCellText(row, 0, entry.mnemonic)
-            opcodeGrid.setCellText(row, 1, "%02X".format(entry.code))
-            opcodeGrid.setCellText(row, 2, entry.length.toString())
-        }
+        opcodeGrid.loadRows(
+            rows = DefaultOpcodeTable.entries.map { listOf(it.mnemonic, "%02X".format(it.code), it.length.toString()) },
+            minRowCount = DefaultOpcodeTable.entries.size + OPCODE_EXTRA_ROWS,
+        )
         VBox.setVgrow(opcodeGrid, Priority.ALWAYS)
 
         return VBox(
@@ -104,19 +140,19 @@ class MainApp : Application() {
     }
 
     private fun buildMiddlePanel(): VBox {
-        val auxGrid = StringGrid(listOf("Адрес", "Код", "Операнд 1", "Операнд 2"), rowCount = 16)
-        val symbolGrid = StringGrid(listOf("Имя", "Адрес"), rowCount = 10)
-        val errors1 = ListView<String>()
+        auxGrid = StringGrid(listOf("Адрес", "Код", "Операнд 1", "Операнд 2"), rowCount = 0)
+        symbolGrid = StringGrid(listOf("Имя", "Адрес"), rowCount = 0)
+        errors1List = ListView()
 
         VBox.setVgrow(auxGrid, Priority.ALWAYS)
         VBox.setVgrow(symbolGrid, Priority.ALWAYS)
-        VBox.setVgrow(errors1, Priority.SOMETIMES)
+        VBox.setVgrow(errors1List, Priority.SOMETIMES)
 
         return VBox(
             8.0,
             Label("Вспомогательная таблица"), auxGrid,
             Label("Таблица символических имён"), symbolGrid,
-            Label("Ошибки первого прохода"), errors1,
+            Label("Ошибки первого прохода"), errors1List,
         ).apply {
             padding = Insets(4.0)
             prefWidth = PANEL_WIDTH
@@ -124,22 +160,94 @@ class MainApp : Application() {
     }
 
     private fun buildObjectPanel(): VBox {
-        val headerGrid = StringGrid(listOf("Имя", "Длина", "Адрес загрузки"), rowCount = 1)
-        val binaryCode = ListView<String>()
-        val errors2 = ListView<String>()
+        headerGrid = StringGrid(listOf("Имя", "Длина", "Адрес загрузки"), rowCount = 1)
+        binaryCodeList = ListView()
+        errors2List = ListView()
 
-        VBox.setVgrow(binaryCode, Priority.ALWAYS)
-        VBox.setVgrow(errors2, Priority.SOMETIMES)
+        VBox.setVgrow(binaryCodeList, Priority.ALWAYS)
+        VBox.setVgrow(errors2List, Priority.SOMETIMES)
 
         return VBox(
             8.0,
             Label("Заголовок объектного модуля"), headerGrid,
-            Label("Двоичный код"), binaryCode,
-            Label("Ошибки второго прохода"), errors2,
+            Label("Двоичный код"), binaryCodeList,
+            Label("Ошибки второго прохода"), errors2List,
         ).apply {
             padding = Insets(4.0)
             prefWidth = PANEL_WIDTH
         }
+    }
+
+    // -------------------------------------------------------------- handlers
+
+    private fun loadSample(sample: AssemblerSample) {
+        sourceGrid.loadRows(
+            rows = sample.lines.map { listOf(it.label, it.op, it.operand1, it.operand2) },
+            minRowCount = sample.lines.size + SOURCE_EXTRA_ROWS,
+        )
+        loadAddressField.text = sample.loadAddress
+        engine.reset()
+        resetResults()
+    }
+
+    private fun resetResults() {
+        auxGrid.clearDataRows(0)
+        symbolGrid.clearDataRows(0)
+        errors1List.items.clear()
+        headerGrid.clearDataRows(1)
+        binaryCodeList.items.clear()
+        errors2List.items.clear()
+        secondPassButton.isDisable = true
+    }
+
+    private fun readSource(): List<SourceLine> =
+        sourceGrid.rowsAsText().map { cells ->
+            SourceLine(
+                label = cells.getOrElse(0) { "" },
+                op = cells.getOrElse(1) { "" },
+                operand1 = cells.getOrElse(2) { "" },
+                operand2 = cells.getOrElse(3) { "" },
+            )
+        }
+
+    private fun readOpcodes(): List<OpcodeEntry> =
+        opcodeGrid.rowsAsText().mapNotNull { cells ->
+            val mnemonic = cells.getOrElse(0) { "" }.trim()
+            if (mnemonic.isBlank()) return@mapNotNull null
+            val code = parseHex(cells.getOrElse(1) { "" }) ?: return@mapNotNull null
+            val length = cells.getOrElse(2) { "" }.trim().toIntOrNull() ?: return@mapNotNull null
+            OpcodeEntry(mnemonic, code, length)
+        }
+
+    private fun onFirstPass() {
+        val loadAddress = parseHex(loadAddressField.text)
+        if (loadAddress == null) {
+            errors1List.items.setAll("Некорректный адрес загрузки: '${loadAddressField.text}'")
+            secondPassButton.isDisable = true
+            return
+        }
+
+        val result = engine.runPass1(readSource(), readOpcodes(), loadAddress)
+
+        auxGrid.loadRows(result.auxTable.map { listOf(toHex8(it.address), it.opText, it.operand1, it.operand2) })
+        symbolGrid.loadRows(result.symbolTable.map { listOf(it.name, toHex8(it.address)) })
+        errors1List.items.setAll(result.errors.map { it.toString() })
+
+        headerGrid.clearDataRows(1)
+        binaryCodeList.items.clear()
+        errors2List.items.clear()
+
+        secondPassButton.isDisable = result.errors.isNotEmpty()
+    }
+
+    private fun onSecondPass() {
+        val result = engine.runPass2(readOpcodes())
+
+        headerGrid.loadRows(
+            listOf(listOf(result.header.name, toHex8(result.header.length), toHex8(result.header.loadAddress))),
+        )
+        binaryCodeList.items.setAll(result.binaryLines)
+        errors2List.items.setAll(result.errors.map { it.toString() })
     }
 }
 

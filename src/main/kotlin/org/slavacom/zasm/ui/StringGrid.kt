@@ -50,4 +50,30 @@ class StringGrid(
     fun setCellText(row: Int, col: Int, value: String) {
         items[row][col] = value
     }
+
+    /** Текущее содержимое сетки построчно (для передачи в движок ассемблера). */
+    fun rowsAsText(): List<List<String>> = items.map { row -> row.cells.map { it.get() } }
+
+    /**
+     * Полностью заменяет данные сетки. [minRowCount] задаёт минимальное число строк
+     * (лишние — пустые, оставлены для дальнейшего ручного редактирования).
+     */
+    fun loadRows(rows: List<List<String>>, minRowCount: Int = rows.size) {
+        val totalRows = maxOf(rows.size, minRowCount)
+        val columnCount = columns.size
+        val newItems = FXCollections.observableArrayList<GridRow>()
+        for (r in 0 until totalRows) {
+            val gridRow = GridRow(columnCount)
+            if (r < rows.size) {
+                rows[r].forEachIndexed { c, value -> if (c < columnCount) gridRow[c] = value }
+            }
+            newItems += gridRow
+        }
+        items = newItems
+    }
+
+    /** Очищает сетку, оставляя [rowCount] пустых строк. */
+    fun clearDataRows(rowCount: Int) {
+        items = FXCollections.observableArrayList(List(rowCount) { GridRow(columns.size) })
+    }
 }
