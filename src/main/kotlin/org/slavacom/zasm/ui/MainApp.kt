@@ -5,21 +5,29 @@ import javafx.geometry.Insets
 import javafx.geometry.Pos
 import javafx.scene.Scene
 import javafx.scene.control.Button
+import javafx.scene.control.ButtonType
 import javafx.scene.control.ComboBox
+import javafx.scene.control.Dialog
 import javafx.scene.control.Label
 import javafx.scene.control.ListView
+import javafx.scene.control.TextArea
 import javafx.scene.control.TextField
+import javafx.scene.input.Clipboard
+import javafx.scene.input.KeyCode
 import javafx.scene.layout.BorderPane
 import javafx.scene.layout.HBox
 import javafx.scene.layout.Priority
 import javafx.scene.layout.Region
 import javafx.scene.layout.VBox
+import javafx.scene.text.Font
 import javafx.stage.Stage
 import org.slavacom.zasm.engine.AssemblerEngine
 import org.slavacom.zasm.model.DefaultOpcodeTable
 import org.slavacom.zasm.model.OpcodeEntry
 import org.slavacom.zasm.model.SourceLine
+import org.slavacom.zasm.model.formatSourceText
 import org.slavacom.zasm.model.parseHex
+import org.slavacom.zasm.model.parseSourceText
 import org.slavacom.zasm.model.toHex8
 import org.slavacom.zasm.samples.AssemblerSample
 import org.slavacom.zasm.samples.Stage1Samples
@@ -111,6 +119,14 @@ class MainApp : Application() {
             editable = true,
         )
         VBox.setVgrow(sourceGrid, Priority.ALWAYS)
+        installPasteSupport(sourceGrid)
+
+        val sourceHeader = HBox(
+            8.0,
+            Label("Исходный текст"),
+            Region().apply { HBox.setHgrow(this, Priority.ALWAYS) },
+            Button("Вставить текст…").apply { setOnAction { showInsertTextDialog() } },
+        ).apply { alignment = Pos.CENTER_LEFT }
 
         loadAddressField = TextField()
         val loadAddressBox = HBox(8.0, Label("Адрес загрузки:"), loadAddressField).apply {
@@ -130,7 +146,7 @@ class MainApp : Application() {
 
         return VBox(
             8.0,
-            Label("Исходный текст"), sourceGrid,
+            sourceHeader, sourceGrid,
             loadAddressBox,
             Label("Таблица кодов операций"), opcodeGrid,
         ).apply {
@@ -179,6 +195,55 @@ class MainApp : Application() {
     }
 
     // -------------------------------------------------------------- handlers
+
+    /**
+     * Ctrl+V прямо на сетке (когда ни одна ячейка не редактируется) заменяет
+     * содержимое всей сетки текстом из буфера обмена — быстрая вставка
+     * готовой программы без открытия диалога. Пока идёт редактирование
+     * конкретной ячейки, Ctrl+V работает как обычная вставка в текстовое поле.
+     */
+    private fun installPasteSupport(grid: StringGrid) {
+        grid.setOnKeyPressed { event ->
+            if (event.isControlDown && event.code == KeyCode.V && grid.editingCell == null) {
+                val clipboard = Clipboard.getSystemClipboard()
+                if (clipboard.hasString()) {
+                    applyParsedSource(clipboard.string)
+                    event.consume()
+                }
+            }
+        }
+    }
+
+    private fun showInsertTextDialog() {
+        val dialog = Dialog<ButtonType>()
+        dialog.title = "Вставить исходный текст"
+        dialog.headerText = "По одной команде на строку: [Метка] Операция [Операнд1] [Операнд2].\n" +
+            "Метка учитывается, только если строка НЕ начинается с пробела.\n" +
+            "Операнд с пробелами внутри — в кавычках, например: Text BYTE \"Hello world\""
+
+        val textArea = TextArea(formatSourceText(readSource().filterNot { it.isBlank })).apply {
+            prefRowCount = 18
+            prefColumnCount = 44
+            isWrapText = false
+            font = Font.font("Monospaced", 13.0)
+        }
+        dialog.dialogPane.content = textArea
+        dialog.dialogPane.buttonTypes.addAll(ButtonType.OK, ButtonType.CANCEL)
+
+        dialog.showAndWait()
+            .filter { it == ButtonType.OK }
+            .ifPresent { applyParsedSource(textArea.text) }
+    }
+
+    private fun applyParsedSource(text: String) {
+        val parsed = parseSourceText(text)
+        sourceGrid.loadRows(
+            rows = parsed.map { listOf(it.label, it.op, it.operand1, it.operand2) },
+            minRowCount = parsed.size + SOURCE_EXTRA_ROWS,
+        )
+        engine.reset()
+        resetResults()
+    }
 
     private fun loadSample(sample: AssemblerSample) {
         sourceGrid.loadRows(
