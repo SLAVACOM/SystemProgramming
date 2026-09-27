@@ -55,4 +55,23 @@ class Pass2EngineTest {
         assertTrue(pass2.errors.single().message.contains("Nowhere"))
         assertTrue(pass2.binaryLines.isEmpty())
     }
+
+    @Test
+    fun `SUB uses the same register-register format as ADD`() {
+        val pass1 = Pass1Engine.run(
+            listOf(
+                org.slavacom.zasm.model.SourceLine("Exampl", "Start", "00001000", ""),
+                org.slavacom.zasm.model.SourceLine("", "SUB", "R1", "R2"),
+                org.slavacom.zasm.model.SourceLine("", "End", "", ""),
+            ),
+            opcodes,
+            loadAddress = 0x1000,
+        )
+        assertTrue(pass1.errors.isEmpty())
+
+        val pass2 = Pass2Engine.run(pass1, opcodes)
+
+        assertTrue(pass2.errors.isEmpty(), "неожиданные ошибки: ${pass2.errors}")
+        assertEquals(listOf("07 01 02"), pass2.binaryLines)
+    }
 }

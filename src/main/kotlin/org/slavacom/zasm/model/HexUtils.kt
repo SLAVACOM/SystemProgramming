@@ -25,3 +25,7 @@ fun toHex4(value: Int): String = "%04X".format(value and 0xFFFF)
 
 /** Код операции/номер регистра — 1 байт. */
 fun toHex2(value: Int): String = "%02X".format(value and 0xFF)
+
+/** Номер регистра из операнда вида "R1"/"r1"; null, если это не регистр. */
+fun registerNumber(operand: String): Int? =
+    operand.trim().removePrefix("R").removePrefix("r").toIntOrNull()

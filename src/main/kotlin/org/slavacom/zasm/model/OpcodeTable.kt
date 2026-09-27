@@ -4,11 +4,11 @@ package org.slavacom.zasm.model
 data class OpcodeEntry(val mnemonic: String, val code: Int, val length: Int)
 
 /**
- * Набор команд абстрактного процессора по умолчанию.
- *
- * Команды с суффиксом N используют относительную адресацию (смещение,
- * настройка при загрузке не требуется), без суффикса — прямую (требует
- * записи в таблицу настройки, см. Этап 2).
+ * Набор команд абстрактного процессора по умолчанию — ровно 4 формата
+ * (см. [InstructionFormat]): LD/SAV — регистр+адрес (прямая адресация),
+ * LDN/SAVN — регистр+смещение (относительная адресация), JUMP/CALL — только
+ * адрес (прямая адресация), ADD/SUB — регистр+регистр (известно уже после
+ * первого прохода, настройка не требуется).
  */
 object DefaultOpcodeTable {
     val entries: List<OpcodeEntry> = listOf(
@@ -18,7 +18,7 @@ object DefaultOpcodeTable {
         OpcodeEntry("SAVN", 0x04, 4),
         OpcodeEntry("ADD", 0x05, 3),
         OpcodeEntry("JUMP", 0x06, 5),
-        OpcodeEntry("JUMPN", 0x07, 3),
+        OpcodeEntry("SUB", 0x07, 3),
         OpcodeEntry("CALL", 0x08, 5),
     )
 }

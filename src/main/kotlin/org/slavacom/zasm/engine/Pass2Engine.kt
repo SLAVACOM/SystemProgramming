@@ -2,8 +2,10 @@ package org.slavacom.zasm.engine
 
 import org.slavacom.zasm.model.AssemblerError
 import org.slavacom.zasm.model.AuxTableRow
+import org.slavacom.zasm.model.InstructionFormat
 import org.slavacom.zasm.model.ObjectHeader
 import org.slavacom.zasm.model.OpcodeEntry
+import org.slavacom.zasm.model.instructionFormatOf
 import org.slavacom.zasm.model.parseNumberOrHex
 import org.slavacom.zasm.model.toHex2
 import org.slavacom.zasm.model.toHex4
@@ -17,14 +19,13 @@ data class Pass2Result(
 )
 
 /**
- * Второй проход: разрешает символические операнды вспомогательной таблицы
- * и формирует двоичный код.
+ * Второй проход: довершает частично сгенерированные командные строки
+ * вспомогательной таблицы — разрешает символический операнд (адрес или
+ * смещение) и дописывает уже готовые регистровые байты из [Pass1Engine].
  *
- * Форма команды (прямая/относительная адресация, состав операндов) жёстко
- * привязана к конкретной мнемонике из набора по умолчанию (см.
- * [org.slavacom.zasm.model.DefaultOpcodeTable]). Изменение кодов/длин в
- * редактируемой ТКО поддерживается, но добавление принципиально новой
- * мнемоники потребует расширения [encodeInstruction].
+ * Формат команды строго один из четырёх [InstructionFormat]; изменение
+ * кодов/длин в редактируемой ТКО поддерживается, добавление принципиально
+ * новой мнемоники потребует расширения [org.slavacom.zasm.model.instructionFormatOf].
  */
 object Pass2Engine {
 
@@ -80,58 +81,42 @@ object Pass2Engine {
             return entry.address
         }
 
-        private fun register(operand: String, lineNo: Int): Int? {
-            val number = operand.trim().removePrefix("R").removePrefix("r").toIntOrNull()
-            if (number == null) {
-                errors += AssemblerError(lineNo, "ожидался регистр, получено '$operand'")
-            }
-            return number
-        }
-
         private fun encodeInstruction(entry: OpcodeEntry, row: AuxTableRow): String? {
+            val format = instructionFormatOf(entry.mnemonic)
+            if (format == null) {
+                errors += AssemblerError(row.sourceLine, "неизвестная форма команды '${entry.mnemonic}'")
+                return null
+            }
+
             val nextAddress = row.address + entry.length
             val parts = mutableListOf(toHex2(entry.code))
 
-            return when (entry.mnemonic.uppercase()) {
-                "LD", "SAV" -> {
-                    val reg = register(row.operand1, row.sourceLine) ?: return null
+            return when (format) {
+                InstructionFormat.REG_ADDR -> {
                     val target = resolve(row.operand2, row.sourceLine) ?: return null
-                    parts += toHex2(reg)
+                    parts += row.operand1 // уже hex-байт регистра, закодирован на первом проходе
                     parts += toHex8(target)
                     parts.joinToString(" ")
                 }
 
-                "LDN", "SAVN" -> {
-                    val reg = register(row.operand1, row.sourceLine) ?: return null
+                InstructionFormat.REG_OFFSET -> {
                     val target = resolve(row.operand2, row.sourceLine) ?: return null
-                    parts += toHex2(reg)
+                    parts += row.operand1
                     parts += toHex4(target - nextAddress)
                     parts.joinToString(" ")
                 }
 
-                "JUMP", "CALL" -> {
+                InstructionFormat.ADDR_ONLY -> {
                     val target = resolve(row.operand1, row.sourceLine) ?: return null
                     parts += toHex8(target)
                     parts.joinToString(" ")
                 }
 
-                "JUMPN" -> {
-                    val target = resolve(row.operand1, row.sourceLine) ?: return null
-                    parts += toHex4(target - nextAddress)
+                InstructionFormat.REG_REG -> {
+                    // оба операнда — регистры, полностью закодированы уже на первом проходе
+                    parts += row.operand1
+                    parts += row.operand2
                     parts.joinToString(" ")
-                }
-
-                "ADD" -> {
-                    val reg1 = register(row.operand1, row.sourceLine) ?: return null
-                    val reg2 = register(row.operand2, row.sourceLine) ?: return null
-                    parts += toHex2(reg1)
-                    parts += toHex2(reg2)
-                    parts.joinToString(" ")
-                }
-
-                else -> {
-                    errors += AssemblerError(row.sourceLine, "неизвестная форма команды '${entry.mnemonic}'")
-                    null
                 }
             }
         }
