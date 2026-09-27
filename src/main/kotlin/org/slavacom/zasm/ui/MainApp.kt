@@ -5,15 +5,12 @@ import javafx.geometry.Insets
 import javafx.geometry.Pos
 import javafx.scene.Scene
 import javafx.scene.control.Button
-import javafx.scene.control.ButtonType
 import javafx.scene.control.ComboBox
-import javafx.scene.control.Dialog
 import javafx.scene.control.Label
 import javafx.scene.control.ListView
 import javafx.scene.control.TextArea
 import javafx.scene.control.TextField
-import javafx.scene.input.Clipboard
-import javafx.scene.input.KeyCode
+import javafx.scene.control.Tooltip
 import javafx.scene.layout.BorderPane
 import javafx.scene.layout.HBox
 import javafx.scene.layout.Priority
@@ -22,6 +19,7 @@ import javafx.scene.layout.VBox
 import javafx.scene.text.Font
 import javafx.stage.Stage
 import org.slavacom.zasm.engine.AssemblerEngine
+import org.slavacom.zasm.engine.Pass1Engine
 import org.slavacom.zasm.model.DefaultOpcodeTable
 import org.slavacom.zasm.model.OpcodeEntry
 import org.slavacom.zasm.model.SourceLine
@@ -33,7 +31,6 @@ import org.slavacom.zasm.samples.AssemblerSample
 import org.slavacom.zasm.samples.Stage1Samples
 
 private const val PANEL_WIDTH = 380.0
-private const val SOURCE_EXTRA_ROWS = 6
 private const val OPCODE_EXTRA_ROWS = 4
 
 /**
@@ -47,9 +44,9 @@ class MainApp : Application() {
     private lateinit var firstPassButton: Button
     private lateinit var secondPassButton: Button
     private lateinit var exampleBox: ComboBox<AssemblerSample>
-
-    private lateinit var sourceGrid: StringGrid
     private lateinit var loadAddressField: TextField
+
+    private lateinit var sourceTextArea: TextArea
     private lateinit var opcodeGrid: StringGrid
 
     private lateinit var auxGrid: StringGrid
@@ -85,13 +82,30 @@ class MainApp : Application() {
         }
         val spacer = Region().apply { HBox.setHgrow(this, Priority.ALWAYS) }
 
+        loadAddressField = TextField().apply {
+            promptText = "необязательно, напр. 00001000"
+            prefColumnCount = 12
+            tooltip = Tooltip(
+                "Необязательный адрес загрузки по умолчанию.\n" +
+                    "Если в исходном тексте директива Start указывает свой\n" +
+                    "адрес (например 'Exampl Start 00001000') — он ИМЕЕТ\n" +
+                    "ПРИОРИТЕТ и переопределяет значение этого поля.",
+            )
+        }
+
         exampleBox = ComboBox<AssemblerSample>().apply {
             items.addAll(Stage1Samples.all)
             selectionModel.selectFirst()
             setOnAction { selectionModel.selectedItem?.let { loadSample(it) } }
         }
 
-        return HBox(10.0, firstPassButton, secondPassButton, spacer, Label("Выбор примера:"), exampleBox).apply {
+        return HBox(
+            10.0,
+            firstPassButton, secondPassButton,
+            spacer,
+            Label("Адрес загрузки (опц.):"), loadAddressField,
+            Label("Выбор примера:"), exampleBox,
+        ).apply {
             padding = Insets(8.0)
             alignment = Pos.CENTER_LEFT
         }
@@ -113,25 +127,19 @@ class MainApp : Application() {
     }
 
     private fun buildSourcePanel(): VBox {
-        sourceGrid = StringGrid(
-            columnTitles = listOf("Метка", "Операция", "Операнд 1", "Операнд 2"),
-            rowCount = 1,
-            editable = true,
-        )
-        VBox.setVgrow(sourceGrid, Priority.ALWAYS)
-        installPasteSupport(sourceGrid)
+        sourceTextArea = TextArea().apply {
+            font = Font.font("Monospaced", 13.0)
+            isWrapText = false
+        }
+        VBox.setVgrow(sourceTextArea, Priority.ALWAYS)
 
         val sourceHeader = HBox(
             8.0,
             Label("Исходный текст"),
             Region().apply { HBox.setHgrow(this, Priority.ALWAYS) },
-            Button("Вставить текст…").apply { setOnAction { showInsertTextDialog() } },
+            Button("Проверить синтаксис").apply { setOnAction { onCheckSyntax() } },
+            Button("Отформатировать").apply { setOnAction { onFormatSource() } },
         ).apply { alignment = Pos.CENTER_LEFT }
-
-        loadAddressField = TextField()
-        val loadAddressBox = HBox(8.0, Label("Адрес загрузки:"), loadAddressField).apply {
-            alignment = Pos.CENTER_LEFT
-        }
 
         opcodeGrid = StringGrid(
             columnTitles = listOf("Мнемоника", "Код", "Длина"),
@@ -146,8 +154,7 @@ class MainApp : Application() {
 
         return VBox(
             8.0,
-            sourceHeader, sourceGrid,
-            loadAddressBox,
+            sourceHeader, sourceTextArea,
             Label("Таблица кодов операций"), opcodeGrid,
         ).apply {
             padding = Insets(4.0)
@@ -196,60 +203,25 @@ class MainApp : Application() {
 
     // -------------------------------------------------------------- handlers
 
-    /**
-     * Ctrl+V прямо на сетке (когда ни одна ячейка не редактируется) заменяет
-     * содержимое всей сетки текстом из буфера обмена — быстрая вставка
-     * готовой программы без открытия диалога. Пока идёт редактирование
-     * конкретной ячейки, Ctrl+V работает как обычная вставка в текстовое поле.
-     */
-    private fun installPasteSupport(grid: StringGrid) {
-        grid.setOnKeyPressed { event ->
-            if (event.isControlDown && event.code == KeyCode.V && grid.editingCell == null) {
-                val clipboard = Clipboard.getSystemClipboard()
-                if (clipboard.hasString()) {
-                    applyParsedSource(clipboard.string)
-                    event.consume()
-                }
-            }
-        }
+    private fun onFormatSource() {
+        sourceTextArea.text = formatSourceText(parseSourceText(sourceTextArea.text))
     }
 
-    private fun showInsertTextDialog() {
-        val dialog = Dialog<ButtonType>()
-        dialog.title = "Вставить исходный текст"
-        dialog.headerText = "По одной команде на строку: [Метка] Операция [Операнд1] [Операнд2].\n" +
-            "Метка учитывается, только если строка НЕ начинается с пробела.\n" +
-            "Операнд с пробелами внутри — в кавычках, например: Text BYTE \"Hello world\""
-
-        val textArea = TextArea(formatSourceText(readSource().filterNot { it.isBlank })).apply {
-            prefRowCount = 18
-            prefColumnCount = 44
-            isWrapText = false
-            font = Font.font("Monospaced", 13.0)
+    private fun onCheckSyntax() {
+        val addressInput = readLoadAddressField()
+        if (addressInput is LoadAddressInput.Invalid) {
+            errors1List.items.setAll("Некорректный адрес загрузки в поле: '${addressInput.text}'")
+            return
         }
-        dialog.dialogPane.content = textArea
-        dialog.dialogPane.buttonTypes.addAll(ButtonType.OK, ButtonType.CANCEL)
-
-        dialog.showAndWait()
-            .filter { it == ButtonType.OK }
-            .ifPresent { applyParsedSource(textArea.text) }
-    }
-
-    private fun applyParsedSource(text: String) {
-        val parsed = parseSourceText(text)
-        sourceGrid.loadRows(
-            rows = parsed.map { listOf(it.label, it.op, it.operand1, it.operand2) },
-            minRowCount = parsed.size + SOURCE_EXTRA_ROWS,
+        val fieldAddress = (addressInput as? LoadAddressInput.Valid)?.value
+        val result = Pass1Engine.run(readSource(), readOpcodes(), fieldAddress)
+        errors1List.items.setAll(
+            if (result.errors.isEmpty()) listOf("Ошибок не найдено.") else result.errors.map { it.toString() },
         )
-        engine.reset()
-        resetResults()
     }
 
     private fun loadSample(sample: AssemblerSample) {
-        sourceGrid.loadRows(
-            rows = sample.lines.map { listOf(it.label, it.op, it.operand1, it.operand2) },
-            minRowCount = sample.lines.size + SOURCE_EXTRA_ROWS,
-        )
+        sourceTextArea.text = formatSourceText(sample.lines)
         loadAddressField.text = sample.loadAddress
         engine.reset()
         resetResults()
@@ -265,15 +237,7 @@ class MainApp : Application() {
         secondPassButton.isDisable = true
     }
 
-    private fun readSource(): List<SourceLine> =
-        sourceGrid.rowsAsText().map { cells ->
-            SourceLine(
-                label = cells.getOrElse(0) { "" },
-                op = cells.getOrElse(1) { "" },
-                operand1 = cells.getOrElse(2) { "" },
-                operand2 = cells.getOrElse(3) { "" },
-            )
-        }
+    private fun readSource(): List<SourceLine> = parseSourceText(sourceTextArea.text)
 
     private fun readOpcodes(): List<OpcodeEntry> =
         opcodeGrid.rowsAsText().mapNotNull { cells ->
@@ -284,15 +248,30 @@ class MainApp : Application() {
             OpcodeEntry(mnemonic, code, length)
         }
 
+    /** Поле адреса загрузки необязательно — пустое отдаёт `null` (см. [Pass1Engine]: тогда решает `Start`). */
+    private sealed class LoadAddressInput {
+        data object Absent : LoadAddressInput()
+        data class Valid(val value: Int) : LoadAddressInput()
+        data class Invalid(val text: String) : LoadAddressInput()
+    }
+
+    private fun readLoadAddressField(): LoadAddressInput {
+        val text = loadAddressField.text.trim()
+        if (text.isEmpty()) return LoadAddressInput.Absent
+        val parsed = parseHex(text)
+        return if (parsed != null) LoadAddressInput.Valid(parsed) else LoadAddressInput.Invalid(text)
+    }
+
     private fun onFirstPass() {
-        val loadAddress = parseHex(loadAddressField.text)
-        if (loadAddress == null) {
-            errors1List.items.setAll("Некорректный адрес загрузки: '${loadAddressField.text}'")
-            secondPassButton.isDisable = true
+        val addressInput = readLoadAddressField()
+        if (addressInput is LoadAddressInput.Invalid) {
+            resetResults()
+            errors1List.items.setAll("Некорректный адрес загрузки в поле: '${addressInput.text}'")
             return
         }
+        val fieldAddress = (addressInput as? LoadAddressInput.Valid)?.value
 
-        val result = engine.runPass1(readSource(), readOpcodes(), loadAddress)
+        val result = engine.runPass1(readSource(), readOpcodes(), fieldAddress)
 
         auxGrid.loadRows(result.auxTable.map { listOf(toHex8(it.address), it.opText, it.operand1, it.operand2) })
         symbolGrid.loadRows(result.symbolTable.map { listOf(it.name, toHex8(it.address)) })

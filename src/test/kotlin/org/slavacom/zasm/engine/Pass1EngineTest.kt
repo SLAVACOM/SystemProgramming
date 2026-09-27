@@ -67,6 +67,35 @@ class Pass1EngineTest {
     }
 
     @Test
+    fun `Start address is used when the load address field is absent`() {
+        val result = Pass1Engine.run(Stage1Samples.default.lines, opcodes, loadAddress = null)
+
+        assertTrue(result.errors.isEmpty(), "неожиданные ошибки: ${result.errors}")
+        assertEquals(0x1000, result.loadAddress)
+        assertEquals(0x1000, result.symbolTable.first { it.name == "Loop" }.address)
+    }
+
+    @Test
+    fun `Start address overrides the load address field when both are given`() {
+        val result = Pass1Engine.run(Stage1Samples.default.lines, opcodes, loadAddress = 0x2000)
+
+        // в исходнике Start Exampl 00001000 — он должен победить поле (0x2000)
+        assertEquals(0x1000, result.loadAddress)
+    }
+
+    @Test
+    fun `missing load address in both the field and Start is an error`() {
+        val source = listOf(
+            SourceLine("Exampl", "Start", "", ""),
+            SourceLine("", "End", "", ""),
+        )
+
+        val result = Pass1Engine.run(source, opcodes, loadAddress = null)
+
+        assertTrue(result.errors.any { it.message.contains("не указан адрес загрузки") }, "ошибки: ${result.errors}")
+    }
+
+    @Test
     fun `label matching a mnemonic or pseudo-op is rejected`() {
         val source = listOf(
             SourceLine("Exampl", "Start", "00001000", ""),

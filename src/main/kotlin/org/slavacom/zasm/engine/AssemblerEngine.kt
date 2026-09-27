@@ -13,7 +13,7 @@ class AssemblerEngine {
     val hasPass1Result: Boolean
         get() = lastPass1 != null
 
-    fun runPass1(source: List<SourceLine>, opcodes: List<OpcodeEntry>, loadAddress: Int): Pass1Result {
+    fun runPass1(source: List<SourceLine>, opcodes: List<OpcodeEntry>, loadAddress: Int?): Pass1Result {
         val result = Pass1Engine.run(source, opcodes, loadAddress)
         lastPass1 = result
         return result

@@ -7,6 +7,7 @@ import org.slavacom.zasm.model.OpcodeEntry
 import org.slavacom.zasm.model.SourceLine
 import org.slavacom.zasm.model.SymbolTableEntry
 import org.slavacom.zasm.model.instructionFormatOf
+import org.slavacom.zasm.model.parseHex
 import org.slavacom.zasm.model.registerNumber
 import org.slavacom.zasm.model.toHex2
 
@@ -26,6 +27,11 @@ data class Pass1Result(
  * и кодируются в hex уже здесь; символический адрес/смещение остаётся
  * неразрешённым текстом (именем), это довершает [Pass2Engine], когда
  * построена полная ТСИ.
+ *
+ * [loadAddress] — необязательный адрес из поля UI ("по умолчанию"); если
+ * директива `Start` в тексте сама указывает адрес операндом (`Exampl Start
+ * 00001000`), он ИМЕЕТ ПРИОРИТЕТ и переопределяет значение поля. Если ни
+ * поле, ни `Start` адреса не задают — ошибка «не указан адрес загрузки».
  */
 object Pass1Engine {
 
@@ -35,14 +41,15 @@ object Pass1Engine {
     private const val PSEUDO_BYTE = "BYTE"
     private val PSEUDO_OPS = setOf(PSEUDO_START, PSEUDO_END, PSEUDO_WORD, PSEUDO_BYTE)
 
-    fun run(source: List<SourceLine>, opcodes: List<OpcodeEntry>, loadAddress: Int): Pass1Result {
+    fun run(source: List<SourceLine>, opcodes: List<OpcodeEntry>, loadAddress: Int?): Pass1Result {
         val auxTable = mutableListOf<AuxTableRow>()
         val symbolTable = mutableListOf<SymbolTableEntry>()
         val errors = mutableListOf<AssemblerError>()
         val knownNames = mutableSetOf<String>()
         val reservedNames = PSEUDO_OPS + opcodes.map { it.mnemonic.uppercase() }
 
-        var address = loadAddress
+        var resolvedLoadAddress = loadAddress
+        var address = loadAddress ?: 0
         var programName = ""
         var sawStart = false
         var sawEnd = false
@@ -81,6 +88,19 @@ object Pass1Engine {
                     }
                     sawStart = true
                     programName = line.label.trim()
+
+                    val addressText = line.operand1.trim()
+                    if (addressText.isNotEmpty()) {
+                        val parsedAddress = parseHex(addressText)
+                        if (parsedAddress == null) {
+                            errors += AssemblerError(lineNo, "некорректный адрес в директиве Start: '$addressText'")
+                        } else {
+                            address = parsedAddress
+                            resolvedLoadAddress = parsedAddress
+                        }
+                    } else if (resolvedLoadAddress == null) {
+                        errors += AssemblerError(lineNo, "не указан адрес загрузки (ни в поле, ни в Start)")
+                    }
                 }
 
                 op.equals(PSEUDO_END, ignoreCase = true) -> {
@@ -137,10 +157,11 @@ object Pass1Engine {
             errors += AssemblerError(0, "не найдена директива Start")
         }
 
+        val finalLoadAddress = resolvedLoadAddress ?: 0
         return Pass1Result(
             programName = programName.ifBlank { "NONAME" },
-            loadAddress = loadAddress,
-            programLength = address - loadAddress,
+            loadAddress = finalLoadAddress,
+            programLength = address - finalLoadAddress,
             auxTable = auxTable,
             symbolTable = symbolTable,
             errors = errors,

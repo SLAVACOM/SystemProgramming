@@ -6,7 +6,7 @@ fun parseHex(text: String): Int? {
     if (cleaned.isEmpty()) return null
     return try {
         Integer.parseUnsignedInt(cleaned, 16)
-    } catch (e: NumberFormatException) {
+    } catch (_: NumberFormatException) {
         null
     }
 }
