@@ -76,6 +76,20 @@ class RelocationTest {
     }
 
     @Test
+    fun `mixed mode relocates only direct-addressing commands`() {
+        val result = assemble(Stage2Samples.mixed.lines, AddressingMode.MIXED)
+
+        assertTrue(result.errors.isEmpty(), "неожиданные ошибки: ${result.errors}")
+        assertEquals(listOf(0x58, 0x62), result.relocations)
+        val code = result.records.filter { it.startsWith("T") && it.length > 16 }.map { it.substringAfterLast(' ') }
+        assertEquals("06000054", code.first())                 // JMP [L1] — относительная
+        assertTrue("0900004A" in code, "код: $code")           // LOADR1 B1 — прямая
+        assertTrue("0EFFFFF7" in code, "код: $code")           // LOADR2 [B4] — относительная
+        assertTrue("1500004A" in code, "код: $code")           // SAVER1 B1 — прямая
+        assertEquals(listOf("M  000058", "M  000062"), result.records.filter { it.startsWith("M") })
+    }
+
+    @Test
     fun `operand of the other addressing type is a first pass error`() {
         assertSingleError(pass1(Stage2Samples.relativeInDirectMode).errors, "относительная адресация '[B4]' запрещена")
         assertSingleError(pass1(Stage2Samples.directInRelativeMode).errors, "прямая адресация 'B4' запрещена")

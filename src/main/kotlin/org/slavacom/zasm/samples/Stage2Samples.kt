@@ -38,6 +38,12 @@ object Stage2Samples {
         mode = AddressingMode.RELATIVE,
     )
 
+    val mixed = AssemblerSample(
+        title = "смешанная адресация",
+        lines = program { if (it == "L1" || it == "B4") bracketed(it) else it },
+        mode = AddressingMode.MIXED,
+    )
+
     val relativeInDirectMode = AssemblerSample(
         title = "ошибка: относительный операнд в режиме прямой адресации",
         lines = program { if (it == "B4") bracketed(it) else it },
@@ -69,5 +75,5 @@ object Stage2Samples {
     )
 
     val all: List<AssemblerSample> =
-        listOf(direct, relative, relativeInDirectMode, directInRelativeMode, nonzeroStart, undefinedLabel)
+        listOf(direct, relative, mixed, relativeInDirectMode, directInRelativeMode, nonzeroStart, undefinedLabel)
 }

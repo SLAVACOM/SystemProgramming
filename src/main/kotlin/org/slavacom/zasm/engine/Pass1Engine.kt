@@ -3,8 +3,10 @@ package org.slavacom.zasm.engine
 import org.slavacom.zasm.model.AddressingMode
 import org.slavacom.zasm.model.AssemblerError
 import org.slavacom.zasm.model.AuxTableRow
+import org.slavacom.zasm.model.DIRECT_ADDRESSING
 import org.slavacom.zasm.model.MAX_ADDRESS
 import org.slavacom.zasm.model.OpcodeEntry
+import org.slavacom.zasm.model.RELATIVE_ADDRESSING
 import org.slavacom.zasm.model.SourceLine
 import org.slavacom.zasm.model.SymbolTableEntry
 import org.slavacom.zasm.model.charStringBody
@@ -50,7 +52,7 @@ data class Pass1Result(
  *
  * [mode] = null — абсолютный формат (Этап 1): адрес начала ненулевой, только
  * прямая адресация. Иначе — перемещаемый формат (Этап 2): программа
- * ассемблируется с адреса 0 и допускает только адресацию выбранного режима.
+ * ассемблируется с адреса 0 и допускает только адресацию, разрешённую режимом.
  */
 object Pass1Engine {
 
@@ -281,7 +283,7 @@ object Pass1Engine {
                     if (target != null && !isValidLabel(target)) {
                         fail(lineNo, "ошибка в операнде '$operand1': в квадратных скобках должна быть метка")
                     }
-                    val type = if (target != null) AddressingMode.RELATIVE.typeBits else AddressingMode.DIRECT.typeBits
+                    val type = if (target != null) RELATIVE_ADDRESSING else DIRECT_ADDRESSING
                     addRow(lineNo, toHex2(entry.code * 4 + type), target ?: operand1)
                 }
                 else -> fail(lineNo, "недопустимая длина команды ${entry.mnemonic}: ${entry.length}")
@@ -289,16 +291,16 @@ object Pass1Engine {
             advance(lineNo, entry.length)
         }
 
-        /** Операнд `[метка]` — относительная адресация, иначе прямая; должна совпадать с режимом. */
+        /** Операнд `[метка]` — относительная адресация, иначе прямая; должна быть разрешена режимом. */
         private fun checkAddressingMode(lineNo: Int, operand: String, isRelative: Boolean) {
-            when (mode) {
-                null -> if (isRelative) {
+            when {
+                mode == null -> if (isRelative) {
                     fail(lineNo, "относительная адресация '$operand' недоступна в абсолютном формате")
                 }
-                AddressingMode.DIRECT -> if (isRelative) {
+                isRelative -> if (!mode.allowsRelative) {
                     fail(lineNo, "относительная адресация '$operand' запрещена: выбран режим «${mode.title.lowercase()}»")
                 }
-                AddressingMode.RELATIVE -> if (!isRelative) {
+                else -> if (!mode.allowsDirect) {
                     fail(
                         lineNo,
                         "прямая адресация '$operand' запрещена: выбран режим «${mode.title.lowercase()}» " +

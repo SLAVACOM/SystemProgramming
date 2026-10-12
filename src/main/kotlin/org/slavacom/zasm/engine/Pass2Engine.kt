@@ -1,8 +1,9 @@
 package org.slavacom.zasm.engine
 
-import org.slavacom.zasm.model.AddressingMode
 import org.slavacom.zasm.model.AssemblerError
 import org.slavacom.zasm.model.AuxTableRow
+import org.slavacom.zasm.model.DIRECT_ADDRESSING
+import org.slavacom.zasm.model.RELATIVE_ADDRESSING
 import org.slavacom.zasm.model.SymbolTableEntry
 import org.slavacom.zasm.model.charStringBody
 import org.slavacom.zasm.model.hexStringBody
@@ -90,15 +91,15 @@ object Pass2Engine {
                 ?: fail(row, "МКОП '${row.opText}' отсутствует в таблице кодов операций")
             val operands = when (val addressingType = opByte and 0x03) {
                 0 -> encodeOperand(row, row.operand1) + encodeOperand(row, row.operand2)
-                AddressingMode.DIRECT.typeBits -> {
-                    if (pass1.mode == AddressingMode.RELATIVE) {
+                DIRECT_ADDRESSING -> {
+                    if (pass1.mode?.allowsDirect == false) {
                         fail(row, "прямая адресация запрещена: выбран режим «${pass1.mode.title.lowercase()}»")
                     }
                     if (pass1.mode != null) relocations += row.address
                     resolveAddress(row, entry.length)
                 }
-                AddressingMode.RELATIVE.typeBits -> {
-                    if (pass1.mode != AddressingMode.RELATIVE) {
+                RELATIVE_ADDRESSING -> {
+                    if (pass1.mode?.allowsRelative != true) {
                         fail(row, "относительная адресация запрещена в ${pass1.mode?.let { "режиме «${it.title.lowercase()}»" } ?: "абсолютном формате"}")
                     }
                     resolveOffset(row, entry.length)
