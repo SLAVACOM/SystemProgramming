@@ -2,169 +2,265 @@ package org.slavacom.zasm.engine
 
 import org.slavacom.zasm.model.AssemblerError
 import org.slavacom.zasm.model.AuxTableRow
-import org.slavacom.zasm.model.InstructionFormat
+import org.slavacom.zasm.model.MAX_ADDRESS
 import org.slavacom.zasm.model.OpcodeEntry
 import org.slavacom.zasm.model.SourceLine
 import org.slavacom.zasm.model.SymbolTableEntry
-import org.slavacom.zasm.model.instructionFormatOf
+import org.slavacom.zasm.model.charStringBody
+import org.slavacom.zasm.model.hexStringBody
+import org.slavacom.zasm.model.isAlphanumeric
+import org.slavacom.zasm.model.isDirective
+import org.slavacom.zasm.model.isValidLabel
+import org.slavacom.zasm.model.parseDecimal
 import org.slavacom.zasm.model.parseHex
 import org.slavacom.zasm.model.registerNumber
 import org.slavacom.zasm.model.toHex2
+import org.slavacom.zasm.model.toHex6
 
-/** Результат первого прохода. */
+/** Результат первого прохода. При ошибке таблицы содержат то, что успели построить до неё. */
 data class Pass1Result(
     val programName: String,
-    val loadAddress: Int,
-    val programLength: Int,
+    val startAddress: Int,
+    /** Адрес, следующий за последним байтом программы. */
+    val endAddress: Int,
+    /** Точка входа — операнд END (по умолчанию адрес начала). */
+    val entryPoint: Int,
     val auxTable: List<AuxTableRow>,
     val symbolTable: List<SymbolTableEntry>,
+    /** ТКО, по которой выполнен проход, — второй проход использует именно её. */
+    val opcodes: List<OpcodeEntry>,
     val errors: List<AssemblerError>,
-)
+    /** Замечания, не мешающие второму проходу (например, лишний операнд START). */
+    val warnings: List<AssemblerError>,
+) {
+    val programLength: Int get() = endAddress - startAddress
+    val isSuccess: Boolean get() = errors.isEmpty()
+}
 
 /**
- * Первый проход: вычисляет адреса меток и формирует вспомогательную таблицу
- * с ЧАСТИЧНО СГЕНЕРИРОВАННЫМИ командами — регистровые операнды известны сразу
- * и кодируются в hex уже здесь; символический адрес/смещение остаётся
- * неразрешённым текстом (именем), это довершает [Pass2Engine], когда
- * построена полная ТСИ.
- *
- * [loadAddress] — необязательный адрес из поля UI ("по умолчанию"); если
- * директива `Start` в тексте сама указывает адрес операндом (`Exampl Start
- * 00001000`), он ИМЕЕТ ПРИОРИТЕТ и переопределяет значение поля. Если ни
- * поле, ни `Start` адреса не задают — ошибка «не указан адрес загрузки».
+ * Первый проход ассемблера в абсолютном формате: проверяет синтаксис, считает
+ * адреса, строит ТСИ и вспомогательную таблицу. Для команд в таблицу пишется
+ * код операции с типом адресации (`код*4` — без адресации, `код*4+1` — прямая
+ * адресация для команд длиной 3/4); операнды переносятся как есть и
+ * разрешаются на втором проходе. Останавливается на первой ошибке.
  */
 object Pass1Engine {
 
-    private const val PSEUDO_START = "START"
-    private const val PSEUDO_END = "END"
-    private const val PSEUDO_WORD = "WORD"
-    private const val PSEUDO_BYTE = "BYTE"
-    private val PSEUDO_OPS = setOf(PSEUDO_START, PSEUDO_END, PSEUDO_WORD, PSEUDO_BYTE)
+    fun run(source: List<SourceLine>, opcodes: List<OpcodeEntry>): Pass1Result = Runner(source, opcodes).execute()
 
-    fun run(source: List<SourceLine>, opcodes: List<OpcodeEntry>, loadAddress: Int?): Pass1Result {
-        val auxTable = mutableListOf<AuxTableRow>()
-        val symbolTable = mutableListOf<SymbolTableEntry>()
-        val errors = mutableListOf<AssemblerError>()
-        val knownNames = mutableSetOf<String>()
-        val reservedNames = PSEUDO_OPS + opcodes.map { it.mnemonic.uppercase() }
+    private class Failure(val error: AssemblerError) : Exception(error.message)
 
-        var resolvedLoadAddress = loadAddress
-        var address = loadAddress ?: 0
-        var programName = ""
-        var sawStart = false
-        var sawEnd = false
+    private class Runner(private val source: List<SourceLine>, private val opcodes: List<OpcodeEntry>) {
+        private val auxTable = mutableListOf<AuxTableRow>()
+        private val symbolTable = mutableListOf<SymbolTableEntry>()
+        private val warnings = mutableListOf<AssemblerError>()
 
-        fun defineSymbol(name: String, atAddress: Int, lineNo: Int) {
-            if (name.isBlank()) return
-            if (name.uppercase() in reservedNames) {
-                errors += AssemblerError(lineNo, "метка '$name' совпадает с зарезервированным словом (мнемоника/директива)")
-                return
+        private var programName = ""
+        private var startAddress = 0
+        private var address = 0
+        private var entryPoint = 0
+        private var sawStart = false
+
+        fun execute(): Pass1Result {
+            val error = try {
+                process()
+                null
+            } catch (failure: Failure) {
+                failure.error
             }
-            if (!knownNames.add(name.uppercase())) {
-                errors += AssemblerError(lineNo, "повторное определение имени '$name'")
-                return
-            }
-            symbolTable += SymbolTableEntry(name, atAddress)
+            return Pass1Result(
+                programName = programName,
+                startAddress = startAddress,
+                endAddress = address,
+                entryPoint = entryPoint,
+                auxTable = auxTable,
+                symbolTable = symbolTable,
+                opcodes = opcodes,
+                errors = listOfNotNull(error),
+                warnings = warnings,
+            )
         }
 
-        fun encodeRegister(operand: String, lineNo: Int): String {
-            val number = registerNumber(operand)
-            if (number == null) {
-                errors += AssemblerError(lineNo, "ожидался регистр, получено '$operand'")
-                return operand
-            }
-            return toHex2(number)
-        }
+        private fun fail(line: Int, message: String): Nothing = throw Failure(AssemblerError(line, message))
 
-        source.forEachIndexed { index, line ->
-            val lineNo = index + 1
-            if (line.isBlank || sawEnd) return@forEachIndexed
+        private fun process() {
+            val lines = source.withIndex().filterNot { it.value.isBlank }
+            if (lines.isEmpty()) fail(0, "исходный текст программы пуст")
 
-            val op = line.op.trim()
-            when {
-                op.equals(PSEUDO_START, ignoreCase = true) -> {
-                    if (sawStart) {
-                        errors += AssemblerError(lineNo, "повторная директива Start")
+            for ((index, line) in lines) {
+                val lineNo = index + 1
+                val label = line.label.trim()
+                val op = line.op.trim().uppercase()
+                val operand1 = line.operand1.trim()
+                val operand2 = line.operand2.trim()
+
+                checkSyntax(lineNo, label, op, operand1, operand2)
+
+                if (!sawStart) {
+                    if (op != "START") fail(lineNo, "программа должна начинаться с директивы START")
+                    processStart(lineNo, label, operand1, operand2)
+                    continue
+                }
+
+                if (label.isNotEmpty()) {
+                    if (symbolTable.any { it.name == label }) fail(lineNo, "найдена уже существующая метка '$label'")
+                    symbolTable += SymbolTableEntry(label, address)
+                }
+
+                when (op) {
+                    "START" -> fail(lineNo, "повторная директива START")
+                    "END" -> {
+                        processEnd(lineNo, operand1)
+                        return
                     }
-                    sawStart = true
-                    programName = line.label.trim()
+                    "WORD" -> processWord(lineNo, operand1, operand2)
+                    "BYTE" -> processByte(lineNo, operand1, operand2)
+                    "RESB" -> processReserve(lineNo, op, operand1, operand2, unitSize = 1)
+                    "RESW" -> processReserve(lineNo, op, operand1, operand2, unitSize = 3)
+                    "" -> fail(lineNo, "не указан МКОП")
+                    else -> processCommand(lineNo, op, operand1, operand2)
+                }
+            }
+            fail(0, "не найдена директива END (точка входа в программу)")
+        }
 
-                    val addressText = line.operand1.trim()
-                    if (addressText.isNotEmpty()) {
-                        val parsedAddress = parseHex(addressText)
-                        if (parsedAddress == null) {
-                            errors += AssemblerError(lineNo, "некорректный адрес в директиве Start: '$addressText'")
-                        } else {
-                            address = parsedAddress
-                            resolvedLoadAddress = parsedAddress
+        private fun isMnemonic(word: String): Boolean = opcodes.any { it.mnemonic.equals(word, ignoreCase = true) }
+
+        private fun checkSyntax(lineNo: Int, label: String, op: String, operand1: String, operand2: String) {
+            if (label.isNotEmpty()) {
+                if (!isValidLabel(label)) {
+                    fail(lineNo, "недопустимая метка '$label' (латинские буквы и цифры, первая — буква)")
+                }
+                if (isDirective(label) || isMnemonic(label) || registerNumber(label) != null) {
+                    fail(lineNo, "метка '$label' совпадает с зарезервированным словом")
+                }
+                if (sawStart && label.equals(programName, ignoreCase = true)) {
+                    fail(lineNo, "метка '$label' совпадает с именем программы")
+                }
+            }
+            if (!isAlphanumeric(op)) fail(lineNo, "недопустимые символы в поле МКОП '$op'")
+            if (!isAlphanumeric(operand2)) fail(lineNo, "недопустимые символы во втором операнде '$operand2'")
+            for (operand in listOf(operand1, operand2)) {
+                if (isDirective(operand) || isMnemonic(operand)) {
+                    fail(lineNo, "операнд '$operand' совпадает с зарезервированным словом")
+                }
+            }
+        }
+
+        /** Сдвигает счётчик адреса, проверяя выход за границу памяти. */
+        private fun advance(lineNo: Int, size: Int) {
+            if (address.toLong() + size > MAX_ADDRESS) {
+                fail(lineNo, "произошло переполнение — выход за границу памяти ${toHex6(MAX_ADDRESS)}")
+            }
+            address += size
+        }
+
+        private fun addRow(lineNo: Int, opText: String, operand1: String, operand2: String = "") {
+            auxTable += AuxTableRow(address, opText, operand1, operand2, lineNo)
+        }
+
+        private fun rejectSecondOperand(lineNo: Int, op: String, operand2: String) {
+            if (operand2.isNotEmpty()) fail(lineNo, "второй операнд $op не рассматривается")
+        }
+
+        private fun processStart(lineNo: Int, label: String, operand1: String, operand2: String) {
+            val start = parseHex(operand1) ?: fail(lineNo, "неверный адрес начала программы '$operand1'")
+            if (start == 0) fail(lineNo, "адрес начала программы не может быть равен 0")
+            if (start > MAX_ADDRESS) fail(lineNo, "неправильный адрес загрузки (больше ${toHex6(MAX_ADDRESS)})")
+            if (label.isEmpty()) fail(lineNo, "не задано имя программы")
+            if (label.length > 10) fail(lineNo, "превышена длина имени программы (> 10 символов)")
+
+            sawStart = true
+            programName = label
+            startAddress = start
+            address = start
+            entryPoint = start
+            addRow(lineNo, "START", toHex6(start))
+            if (operand2.isNotEmpty()) {
+                warnings += AssemblerError(lineNo, "второй операнд директивы START не рассматривается")
+            }
+        }
+
+        private fun processEnd(lineNo: Int, operand1: String) {
+            if (operand1.isEmpty()) return
+            val entry = parseHex(operand1) ?: fail(lineNo, "неверный адрес входа в программу '$operand1'")
+            if (entry !in startAddress..address) {
+                fail(lineNo, "адрес точки входа ${toHex6(entry)} вне программы (${toHex6(startAddress)}..${toHex6(address)})")
+            }
+            entryPoint = entry
+        }
+
+        private fun processWord(lineNo: Int, operand1: String, operand2: String) {
+            if (operand1 != "?") {
+                val value = parseDecimal(operand1) ?: fail(lineNo, "невозможно выполнить преобразование в число '$operand1'")
+                if (value > MAX_ADDRESS) fail(lineNo, "превышено максимальное значение слова (${MAX_ADDRESS})")
+            }
+            rejectSecondOperand(lineNo, "директивы WORD", operand2)
+            addRow(lineNo, "WORD", operand1)
+            advance(lineNo, 3)
+        }
+
+        private fun processByte(lineNo: Int, operand1: String, operand2: String) {
+            val number = parseDecimal(operand1)
+            val chars = charStringBody(operand1)
+            val hexDigits = hexStringBody(operand1)
+            val size = when {
+                operand1 == "?" -> 1
+                number != null -> {
+                    if (number > 255) fail(lineNo, "значение байта больше 255")
+                    1
+                }
+                chars != null -> chars.length
+                hexDigits != null -> {
+                    if (hexDigits.length % 2 != 0) fail(lineNo, "нечётное количество символов в строке $operand1")
+                    hexDigits.length / 2
+                }
+                else -> fail(lineNo, "неверный формат операнда BYTE '$operand1' (число 0..255, C\"…\", X\"…\" или ?)")
+            }
+            rejectSecondOperand(lineNo, "директивы BYTE", operand2)
+            addRow(lineNo, "BYTE", operand1)
+            advance(lineNo, size)
+        }
+
+        private fun processReserve(lineNo: Int, op: String, operand1: String, operand2: String, unitSize: Int) {
+            val count = parseDecimal(operand1) ?: fail(lineNo, "невозможно выполнить преобразование в число '$operand1'")
+            if (count <= 0) fail(lineNo, "количество для $op должно быть больше нуля")
+            rejectSecondOperand(lineNo, "директивы $op", operand2)
+            addRow(lineNo, op, count.toString())
+            advance(lineNo, count * unitSize)
+        }
+
+        private fun processCommand(lineNo: Int, op: String, operand1: String, operand2: String) {
+            val entry = opcodes.find { it.mnemonic.equals(op, ignoreCase = true) }
+                ?: fail(lineNo, "МКОП '$op' не найден в таблице кодов операций")
+
+            when (entry.length) {
+                1 -> {
+                    if (operand1.isNotEmpty() || operand2.isNotEmpty()) {
+                        fail(lineNo, "операнды не рассматриваются в команде ${entry.mnemonic}")
+                    }
+                    addRow(lineNo, toHex2(entry.code * 4), "")
+                }
+                2 -> {
+                    val number = parseDecimal(operand1)
+                    when {
+                        number != null -> {
+                            if (number > 255) fail(lineNo, "число в команде ${entry.mnemonic} больше 255")
+                            rejectSecondOperand(lineNo, "команды ${entry.mnemonic}", operand2)
                         }
-                    } else if (resolvedLoadAddress == null) {
-                        errors += AssemblerError(lineNo, "не указан адрес загрузки (ни в поле, ни в Start)")
+                        registerNumber(operand1) != null && registerNumber(operand2) != null -> Unit
+                        else -> fail(lineNo, "ошибка в команде ${entry.mnemonic}: ожидается число 0..255 или два регистра")
                     }
+                    addRow(lineNo, toHex2(entry.code * 4), operand1, operand2)
                 }
-
-                op.equals(PSEUDO_END, ignoreCase = true) -> {
-                    sawEnd = true
+                3, 4 -> {
+                    if (operand1.isEmpty()) fail(lineNo, "у команды ${entry.mnemonic} отсутствует операнд")
+                    rejectSecondOperand(lineNo, "команды ${entry.mnemonic}", operand2)
+                    addRow(lineNo, toHex2(entry.code * 4 + 1), operand1)
                 }
-
-                op.equals(PSEUDO_WORD, ignoreCase = true) -> {
-                    defineSymbol(line.label.trim(), address, lineNo)
-                    auxTable += AuxTableRow(address, "WORD", line.operand1.trim(), "", lineNo)
-                    address += 4
-                }
-
-                op.equals(PSEUDO_BYTE, ignoreCase = true) -> {
-                    defineSymbol(line.label.trim(), address, lineNo)
-                    val text = line.operand1
-                    auxTable += AuxTableRow(address, "BYTE", text, "", lineNo)
-                    address += text.length
-                }
-
-                op.isBlank() -> {
-                    errors += AssemblerError(lineNo, "не указана операция")
-                }
-
-                else -> {
-                    val entry = opcodes.find { it.mnemonic.equals(op, ignoreCase = true) }
-                    if (entry == null) {
-                        errors += AssemblerError(lineNo, "неизвестная операция '$op'")
-                    } else {
-                        defineSymbol(line.label.trim(), address, lineNo)
-                        val operand1 = line.operand1.trim()
-                        val operand2 = line.operand2.trim()
-                        val (encoded1, encoded2) = when (instructionFormatOf(entry.mnemonic)) {
-                            InstructionFormat.REG_ADDR, InstructionFormat.REG_OFFSET ->
-                                encodeRegister(operand1, lineNo) to operand2 // операнд2 — имя, разрешит проход 2
-                            InstructionFormat.ADDR_ONLY -> operand1 to "" // сам операнд1 — имя, разрешит проход 2
-                            InstructionFormat.REG_REG ->
-                                encodeRegister(operand1, lineNo) to encodeRegister(operand2, lineNo)
-                            null -> operand1 to operand2 // нестандартная мнемоника из отредактированной ТКО
-                        }
-                        auxTable += AuxTableRow(
-                            address = address,
-                            opText = toHex2(entry.code),
-                            operand1 = encoded1,
-                            operand2 = encoded2,
-                            sourceLine = lineNo,
-                        )
-                        address += entry.length
-                    }
-                }
+                else -> fail(lineNo, "недопустимая длина команды ${entry.mnemonic}: ${entry.length}")
             }
+            advance(lineNo, entry.length)
         }
-
-        if (!sawStart) {
-            errors += AssemblerError(0, "не найдена директива Start")
-        }
-
-        val finalLoadAddress = resolvedLoadAddress ?: 0
-        return Pass1Result(
-            programName = programName.ifBlank { "NONAME" },
-            loadAddress = finalLoadAddress,
-            programLength = address - finalLoadAddress,
-            auxTable = auxTable,
-            symbolTable = symbolTable,
-            errors = errors,
-        )
     }
 }

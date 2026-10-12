@@ -2,3 +2,16 @@
     /* Аналог DefaultRowHeight=15 из методички, немного увеличено под шрифт JavaFX по умолчанию */
     -fx-cell-size: 22px;
 }
+
+.section-title {
+    -fx-font-size: 15px;
+    -fx-font-weight: bold;
+}
+
+.monospace-list .list-cell {
+    -fx-font-family: "Menlo", "Consolas", "Monospaced";
+}
+
+.pass-button {
+    -fx-padding: 10 20 10 20;
+}

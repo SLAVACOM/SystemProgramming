@@ -4,74 +4,89 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.slavacom.zasm.model.DefaultOpcodeTable
+import org.slavacom.zasm.model.OpcodeEntry
+import org.slavacom.zasm.model.SourceLine
 import org.slavacom.zasm.samples.Stage1Samples
 
 class Pass2EngineTest {
 
     private val opcodes = DefaultOpcodeTable.entries
 
+    private fun assemble(lines: List<SourceLine>, table: List<OpcodeEntry> = opcodes): Pass2Result {
+        val pass1 = Pass1Engine.run(lines, table)
+        assertTrue(pass1.isSuccess, "ошибки первого прохода: ${pass1.errors}")
+        return Pass2Engine.run(pass1)
+    }
+
     @Test
-    fun `default sample matches the reference binary code byte for byte`() {
-        val pass1 = Pass1Engine.run(Stage1Samples.default.lines, opcodes, loadAddress = 0x1000)
-        val pass2 = Pass2Engine.run(pass1, opcodes)
+    fun `default sample produces the H-T-E object module of the C# version`() {
+        val result = assemble(Stage1Samples.default.lines)
 
-        assertTrue(pass2.errors.isEmpty(), "неожиданные ошибки: ${pass2.errors}")
-        assertEquals("Exampl", pass2.header.name)
-        assertEquals(0x2B, pass2.header.length)
-        assertEquals(0x1000, pass2.header.loadAddress)
-
+        assertTrue(result.errors.isEmpty(), "неожиданные ошибки: ${result.errors}")
         assertEquals(
             listOf(
-                "01 01 0000101A", // LD R1 One
-                "01 02 0000101E", // LD R2 Two
-                "05 01 02",       // ADD R1 R2
-                "03 01 00001022", // SAV R1 Rez
-                "06 00001000",    // JUMP Loop
-                "00000001",       // One WORD 1
-                "00000002",       // Two WORD 2
-                // Rez WORD ? — не инициализировано, строки в дампе нет
-                "48 65 6C 6C 6F", // Text BYTE Hello
+                "H  PROG  000100  000068",
+                "T  000100  04   05000158",     // JMP L1
+                "T  000104  0A",                // A1 RESB 10
+                "T  00010E  3C",                // A2 RESW 20
+                "T  00014A  03   000028",       // B1 WORD 40
+                "T  00014D  04   2F4C008A",     // B2 BYTE X"2F4C008A"
+                "T  000151  06   48656C6C6F21", // B3 BYTE C"Hello!"
+                "T  000157  01   0C",           // B4 BYTE 12
+                "T  000158  04   0900014A",     // LOADR1 B1
+                "T  00015C  04   0D000157",     // LOADR2 B4
+                "T  000160  02   1012",         // ADD R1 R2
+                "T  000162  04   1500014A",     // SAVER1 B1
+                "T  000166  02   18C8",         // INT 200
+                "E  000100",
             ),
-            pass2.binaryLines,
+            result.records,
         )
     }
 
     @Test
-    fun `undefined symbol on second pass is reported as an error`() {
-        val pass1 = Pass1Engine.run(
-            listOf(
-                org.slavacom.zasm.model.SourceLine("Exampl", "Start", "00001000", ""),
-                org.slavacom.zasm.model.SourceLine("", "JUMP", "Nowhere", ""),
-                org.slavacom.zasm.model.SourceLine("", "End", "", ""),
-            ),
-            opcodes,
-            loadAddress = 0x1000,
-        )
-        assertTrue(pass1.errors.isEmpty())
+    fun `undefined label is a second pass error and clears the output`() {
+        val result = assemble(Stage1Samples.pass2Error.lines)
 
-        val pass2 = Pass2Engine.run(pass1, opcodes)
-
-        assertEquals(1, pass2.errors.size)
-        assertTrue(pass2.errors.single().message.contains("Nowhere"))
-        assertTrue(pass2.binaryLines.isEmpty())
+        assertEquals(1, result.errors.size)
+        assertEquals(3, result.errors.single().line)
+        assertTrue(result.errors.single().message.contains("NOWHERE"))
+        assertTrue(result.records.isEmpty())
     }
 
     @Test
-    fun `SUB uses the same register-register format as ADD`() {
-        val pass1 = Pass1Engine.run(
-            listOf(
-                org.slavacom.zasm.model.SourceLine("Exampl", "Start", "00001000", ""),
-                org.slavacom.zasm.model.SourceLine("", "SUB", "R1", "R2"),
-                org.slavacom.zasm.model.SourceLine("", "End", "", ""),
-            ),
-            opcodes,
-            loadAddress = 0x1000,
+    fun `direct addressing requires a label operand`() {
+        val result = assemble(
+            listOf(SourceLine("PROG", "START", "100", ""), SourceLine("", "JMP", "R1", ""), SourceLine("", "END", "", "")),
         )
-        assertTrue(pass1.errors.isEmpty())
+        assertTrue(result.errors.single().message.contains("меткой"), "ошибки: ${result.errors}")
+    }
 
-        val pass2 = Pass2Engine.run(pass1, opcodes)
+    @Test
+    fun `uninitialized WORD and BYTE reserve memory without code`() {
+        val result = assemble(
+            listOf(
+                SourceLine("PROG", "START", "100", ""),
+                SourceLine("A", "WORD", "?", ""),
+                SourceLine("B", "BYTE", "?", ""),
+                SourceLine("", "END", "", ""),
+            ),
+        )
+        assertEquals(listOf("H  PROG  000100  000004", "T  000100  03", "T  000103  01", "E  000100"), result.records)
+    }
 
-        assertTrue(pass2.errors.isEmpty(), "неожиданные ошибки: ${pass2.errors}")
-        assertEquals(listOf("07 01 02"), pass2.binaryLines)
+    @Test
+    fun `length 1 and length 3 commands from an edited opcode table`() {
+        val table = opcodes + OpcodeEntry("NOP", 0x07, 1) + OpcodeEntry("JS", 0x08, 3)
+        val result = assemble(
+            listOf(
+                SourceLine("PROG", "START", "100", ""),
+                SourceLine("L", "NOP", "", ""),
+                SourceLine("", "JS", "L", ""),
+                SourceLine("", "END", "", ""),
+            ),
+            table,
+        )
+        assertEquals(listOf("H  PROG  000100  000004", "T  000100  01   1C", "T  000101  03   210100", "E  000100"), result.records)
     }
 }

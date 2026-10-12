@@ -3,6 +3,7 @@ package org.slavacom.zasm.ui
 import javafx.application.Platform
 import javafx.beans.property.SimpleStringProperty
 import javafx.collections.FXCollections
+import javafx.scene.control.SelectionMode
 import javafx.scene.control.TableCell
 import javafx.scene.control.TableColumn
 import javafx.scene.control.TableView
@@ -14,6 +15,9 @@ import javafx.util.Callback
 /** Один ряд сетки — аналог строки Delphi `TStringGrid.Cells[*, Row]`. */
 class GridRow(columnCount: Int) {
     val cells: List<SimpleStringProperty> = List(columnCount) { SimpleStringProperty("") }
+
+    val isBlank: Boolean
+        get() = cells.all { it.get().isBlank() }
 
     operator fun get(col: Int): String = cells[col].get()
     operator fun set(col: Int, value: String) {
@@ -139,7 +143,12 @@ class StringGrid(
     columnTitles: List<String>,
     rowCount: Int,
     editable: Boolean = false,
+    /** Держать в конце пустую строку для ввода: заполнили её — появляется следующая. */
+    private val growable: Boolean = false,
 ) : TableView<GridRow>() {
+
+    /** Вызывается после сохранения правки любой ячейки. */
+    var onCellEdited: (() -> Unit)? = null
 
     init {
         isEditable = editable
@@ -152,11 +161,17 @@ class StringGrid(
             column.setCellValueFactory { data -> data.value.cells[index] }
             if (editable) {
                 column.cellFactory = navigableCellFactory()
-                column.setOnEditCommit { event -> event.rowValue[index] = event.newValue }
+                column.setOnEditCommit { event ->
+                    event.rowValue[index] = event.newValue
+                    ensureTrailingEmptyRow()
+                    onCellEdited?.invoke()
+                }
             }
             columns.add(column)
         }
         styleClass.add("zasm-grid")
+        if (growable) selectionModel.selectionMode = SelectionMode.MULTIPLE
+        ensureTrailingEmptyRow()
     }
 
     fun cellText(row: Int, col: Int): String = items[row][col]
@@ -184,10 +199,38 @@ class StringGrid(
             newItems += gridRow
         }
         items = newItems
+        ensureTrailingEmptyRow()
+    }
+
+    val hasSelectedRows: Boolean
+        get() = selectionModel.selectedIndices.isNotEmpty()
+
+    /** Есть ли хоть одна заполненная строка. */
+    val hasData: Boolean
+        get() = items.any { !it.isBlank }
+
+    /** Удаляет выделенные строки (выделение — Shift/Cmd+клик для нескольких). */
+    fun deleteSelectedRows() {
+        val indices = selectionModel.selectedIndices.toList().sortedDescending()
+        selectionModel.clearSelection()
+        indices.forEach { items.removeAt(it) }
+        ensureTrailingEmptyRow()
+    }
+
+    /** Удаляет все строки (у растущей сетки остаётся одна пустая для ввода). */
+    fun deleteAllRows() {
+        selectionModel.clearSelection()
+        items.clear()
+        ensureTrailingEmptyRow()
+    }
+
+    private fun ensureTrailingEmptyRow() {
+        if (growable && (items.isEmpty() || !items.last().isBlank)) items.add(GridRow(columns.size))
     }
 
     /** Очищает сетку, оставляя [rowCount] пустых строк. */
     fun clearDataRows(rowCount: Int) {
         items = FXCollections.observableArrayList(List(rowCount) { GridRow(columns.size) })
+        ensureTrailingEmptyRow()
     }
 }

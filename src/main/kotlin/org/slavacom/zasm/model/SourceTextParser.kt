@@ -1,6 +1,6 @@
 package org.slavacom.zasm.model
 
-private val TOKEN_REGEX = Regex("\"[^\"]*\"|\\S+")
+private val TOKEN_REGEX = Regex("\\S*\"[^\"]*\"\\S*|\\S+")
 
 /**
  * Разбирает исходный текст ассемблера построчно в [SourceLine] — удобная
@@ -10,7 +10,8 @@ private val TOKEN_REGEX = Regex("\"[^\"]*\"|\\S+")
  * Метка распознаётся, только если строка начинается БЕЗ пробела (как в
  * исходниках методички: `Loop  LD  R1  One` — с меткой, `      LD  R2  Two` —
  * без). Операнд со пробелами внутри (например, строка для `BYTE`) можно
- * взять в кавычки: `Text BYTE "Hello world"`.
+ * взять в кавычки: `Text BYTE "Hello world"`; строки вида `C"Hello world"`
+ * и `X"2F4C"` распознаются целиком, вместе с префиксом.
  */
 fun parseSourceText(text: String): List<SourceLine> =
     text.lineSequence()
@@ -55,4 +56,4 @@ private fun unquote(token: String): String =
     }
 
 private fun quoteIfNeeded(value: String): String =
-    if (value.any { it.isWhitespace() }) "\"$value\"" else value
+    if (value.any { it.isWhitespace() } && '"' !in value) "\"$value\"" else value
