@@ -1,5 +1,6 @@
 package org.slavacom.zasm.engine
 
+import org.slavacom.zasm.model.AddressingMode
 import org.slavacom.zasm.model.AssemblerError
 import org.slavacom.zasm.model.AuxTableRow
 import org.slavacom.zasm.model.MAX_ADDRESS
@@ -14,6 +15,7 @@ import org.slavacom.zasm.model.isValidLabel
 import org.slavacom.zasm.model.parseDecimal
 import org.slavacom.zasm.model.parseHex
 import org.slavacom.zasm.model.registerNumber
+import org.slavacom.zasm.model.relativeOperandName
 import org.slavacom.zasm.model.toHex2
 import org.slavacom.zasm.model.toHex6
 
@@ -29,6 +31,8 @@ data class Pass1Result(
     val symbolTable: List<SymbolTableEntry>,
     /** ТКО, по которой выполнен проход, — второй проход использует именно её. */
     val opcodes: List<OpcodeEntry>,
+    /** Режим перемещаемого формата; null — абсолютный формат (Этап 1). */
+    val mode: AddressingMode?,
     val errors: List<AssemblerError>,
     /** Замечания, не мешающие второму проходу (например, лишний операнд START). */
     val warnings: List<AssemblerError>,
@@ -38,19 +42,28 @@ data class Pass1Result(
 }
 
 /**
- * Первый проход ассемблера в абсолютном формате: проверяет синтаксис, считает
- * адреса, строит ТСИ и вспомогательную таблицу. Для команд в таблицу пишется
- * код операции с типом адресации (`код*4` — без адресации, `код*4+1` — прямая
- * адресация для команд длиной 3/4); операнды переносятся как есть и
- * разрешаются на втором проходе. Останавливается на первой ошибке.
+ * Первый проход ассемблера: проверяет синтаксис, считает адреса, строит ТСИ и
+ * вспомогательную таблицу. Для команд в таблицу пишется код операции с типом
+ * адресации (`код*4` — без адресации, `код*4+1` — прямая, `код*4+2` —
+ * относительная, для команд длиной 3/4); операнды переносятся как есть (метка
+ * без скобок) и разрешаются на втором проходе. Останавливается на первой ошибке.
+ *
+ * [mode] = null — абсолютный формат (Этап 1): адрес начала ненулевой, только
+ * прямая адресация. Иначе — перемещаемый формат (Этап 2): программа
+ * ассемблируется с адреса 0 и допускает только адресацию выбранного режима.
  */
 object Pass1Engine {
 
-    fun run(source: List<SourceLine>, opcodes: List<OpcodeEntry>): Pass1Result = Runner(source, opcodes).execute()
+    fun run(source: List<SourceLine>, opcodes: List<OpcodeEntry>, mode: AddressingMode? = null): Pass1Result =
+        Runner(source, opcodes, mode).execute()
 
     private class Failure(val error: AssemblerError) : Exception(error.message)
 
-    private class Runner(private val source: List<SourceLine>, private val opcodes: List<OpcodeEntry>) {
+    private class Runner(
+        private val source: List<SourceLine>,
+        private val opcodes: List<OpcodeEntry>,
+        private val mode: AddressingMode?,
+    ) {
         private val auxTable = mutableListOf<AuxTableRow>()
         private val symbolTable = mutableListOf<SymbolTableEntry>()
         private val warnings = mutableListOf<AssemblerError>()
@@ -76,6 +89,7 @@ object Pass1Engine {
                 auxTable = auxTable,
                 symbolTable = symbolTable,
                 opcodes = opcodes,
+                mode = mode,
                 errors = listOfNotNull(error),
                 warnings = warnings,
             )
@@ -164,9 +178,15 @@ object Pass1Engine {
         }
 
         private fun processStart(lineNo: Int, label: String, operand1: String, operand2: String) {
-            val start = parseHex(operand1) ?: fail(lineNo, "неверный адрес начала программы '$operand1'")
-            if (start == 0) fail(lineNo, "адрес начала программы не может быть равен 0")
-            if (start > MAX_ADDRESS) fail(lineNo, "неправильный адрес загрузки (больше ${toHex6(MAX_ADDRESS)})")
+            val start = if (mode != null && operand1.isEmpty()) 0 else {
+                parseHex(operand1) ?: fail(lineNo, "неверный адрес начала программы '$operand1'")
+            }
+            if (mode == null) {
+                if (start == 0) fail(lineNo, "адрес начала программы не может быть равен 0")
+                if (start > MAX_ADDRESS) fail(lineNo, "неправильный адрес загрузки (больше ${toHex6(MAX_ADDRESS)})")
+            } else if (start != 0) {
+                fail(lineNo, "в перемещаемом формате адрес начала программы должен быть равен 0")
+            }
             if (label.isEmpty()) fail(lineNo, "не задано имя программы")
             if (label.length > 10) fail(lineNo, "превышена длина имени программы (> 10 символов)")
 
@@ -256,11 +276,36 @@ object Pass1Engine {
                 3, 4 -> {
                     if (operand1.isEmpty()) fail(lineNo, "у команды ${entry.mnemonic} отсутствует операнд")
                     rejectSecondOperand(lineNo, "команды ${entry.mnemonic}", operand2)
-                    addRow(lineNo, toHex2(entry.code * 4 + 1), operand1)
+                    val target = relativeOperandName(operand1)
+                    checkAddressingMode(lineNo, operand1, isRelative = target != null)
+                    if (target != null && !isValidLabel(target)) {
+                        fail(lineNo, "ошибка в операнде '$operand1': в квадратных скобках должна быть метка")
+                    }
+                    val type = if (target != null) AddressingMode.RELATIVE.typeBits else AddressingMode.DIRECT.typeBits
+                    addRow(lineNo, toHex2(entry.code * 4 + type), target ?: operand1)
                 }
                 else -> fail(lineNo, "недопустимая длина команды ${entry.mnemonic}: ${entry.length}")
             }
             advance(lineNo, entry.length)
+        }
+
+        /** Операнд `[метка]` — относительная адресация, иначе прямая; должна совпадать с режимом. */
+        private fun checkAddressingMode(lineNo: Int, operand: String, isRelative: Boolean) {
+            when (mode) {
+                null -> if (isRelative) {
+                    fail(lineNo, "относительная адресация '$operand' недоступна в абсолютном формате")
+                }
+                AddressingMode.DIRECT -> if (isRelative) {
+                    fail(lineNo, "относительная адресация '$operand' запрещена: выбран режим «${mode.title.lowercase()}»")
+                }
+                AddressingMode.RELATIVE -> if (!isRelative) {
+                    fail(
+                        lineNo,
+                        "прямая адресация '$operand' запрещена: выбран режим «${mode.title.lowercase()}» " +
+                            "(операнд записывается как [метка])",
+                    )
+                }
+            }
         }
     }
 }

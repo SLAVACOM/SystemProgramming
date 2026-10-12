@@ -1,11 +1,16 @@
 package org.slavacom.zasm.samples
 
+import org.slavacom.zasm.model.AddressingMode
 import org.slavacom.zasm.model.SourceLine
 
-/** Пример исходного текста для ComboBox «Выбор примера». */
+/**
+ * Пример исходного текста для ComboBox «Выбор примера».
+ * [mode] — режим перемещаемого формата, который выбирается вместе с примером (Этап 2).
+ */
 data class AssemblerSample(
     val title: String,
     val lines: List<SourceLine>,
+    val mode: AddressingMode? = null,
 ) {
     override fun toString(): String = title
 }

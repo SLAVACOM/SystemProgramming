@@ -1,7 +1,9 @@
 package org.slavacom.zasm.engine
 
+import org.slavacom.zasm.model.AddressingMode
 import org.slavacom.zasm.model.AssemblerError
 import org.slavacom.zasm.model.AuxTableRow
+import org.slavacom.zasm.model.SymbolTableEntry
 import org.slavacom.zasm.model.charStringBody
 import org.slavacom.zasm.model.hexStringBody
 import org.slavacom.zasm.model.parseDecimal
@@ -11,18 +13,25 @@ import org.slavacom.zasm.model.toAsciiHex
 import org.slavacom.zasm.model.toHex2
 import org.slavacom.zasm.model.toHex6
 
-/** Результат второго прохода: записи объектного модуля H/T/E (пусто при ошибке). */
+/**
+ * Результат второго прохода: записи объектного модуля H/T/M/E и таблица
+ * настройки — адреса команд, операнды которых настраиваются при загрузке
+ * (всё пусто при ошибке).
+ */
 data class Pass2Result(
     val records: List<String>,
     val errors: List<AssemblerError>,
+    val relocations: List<Int> = emptyList(),
 )
 
 /**
- * Второй проход: формирует объектный модуль в абсолютном формате —
+ * Второй проход: формирует объектный модуль —
  * `H  имя  адрес_начала  длина`, по записи `T  адрес  длина  код` на каждую
- * строку вспомогательной таблицы и `E  точка_входа`. Операнды-метки
- * заменяются адресами из ТСИ, регистры — номером (1 hex-цифра), числа — hex.
- * Останавливается на первой ошибке.
+ * строку вспомогательной таблицы, в перемещаемом формате — по записи
+ * `M  адрес_команды` на каждую команду с прямой адресацией, и `E  точка_входа`.
+ * Прямая адресация заменяет метку её адресом из ТСИ, относительная — смещением
+ * от адреса следующей команды (дополнительный код); регистры — номером
+ * (1 hex-цифра), числа — hex. Останавливается на первой ошибке.
  */
 object Pass2Engine {
 
@@ -32,11 +41,13 @@ object Pass2Engine {
 
     private class Runner(private val pass1: Pass1Result) {
         private val records = mutableListOf<String>()
+        private val relocations = mutableListOf<Int>()
 
         fun execute(): Pass2Result = try {
             pass1.auxTable.forEach(::processRow)
+            relocations.forEach { records += "M  ${toHex6(it)}" }
             records += "E  ${toHex6(pass1.entryPoint)}"
-            Pass2Result(records, emptyList())
+            Pass2Result(records, emptyList(), relocations)
         } catch (failure: Failure) {
             Pass2Result(emptyList(), listOf(failure.error))
         }
@@ -77,26 +88,55 @@ object Pass2Engine {
             val opByte = parseHex(row.opText) ?: fail(row, "неизвестный МКОП '${row.opText}'")
             val entry = pass1.opcodes.find { it.code == opByte shr 2 }
                 ?: fail(row, "МКОП '${row.opText}' отсутствует в таблице кодов операций")
-            val addressingType = opByte and 0x03
-
-            val operands = if (addressingType == 1) {
-                resolveAddress(row, entry.length)
-            } else {
-                encodeOperand(row, row.operand1) + encodeOperand(row, row.operand2)
+            val operands = when (val addressingType = opByte and 0x03) {
+                0 -> encodeOperand(row, row.operand1) + encodeOperand(row, row.operand2)
+                AddressingMode.DIRECT.typeBits -> {
+                    if (pass1.mode == AddressingMode.RELATIVE) {
+                        fail(row, "прямая адресация запрещена: выбран режим «${pass1.mode.title.lowercase()}»")
+                    }
+                    if (pass1.mode != null) relocations += row.address
+                    resolveAddress(row, entry.length)
+                }
+                AddressingMode.RELATIVE.typeBits -> {
+                    if (pass1.mode != AddressingMode.RELATIVE) {
+                        fail(row, "относительная адресация запрещена в ${pass1.mode?.let { "режиме «${it.title.lowercase()}»" } ?: "абсолютном формате"}")
+                    }
+                    resolveOffset(row, entry.length)
+                }
+                else -> fail(row, "неизвестный тип адресации $addressingType в МКОП '${row.opText}'")
             }
             codeRecord(row, row.opText + operands)
         }
 
-        /** Прямая адресация: операнд обязан быть меткой; адрес — 2 байта для длины 3, 3 байта для длины 4. */
-        private fun resolveAddress(row: AuxTableRow, commandLength: Int): String {
+        /** Операнд прямой/относительной адресации обязан быть меткой из ТСИ. */
+        private fun findSymbol(row: AuxTableRow): SymbolTableEntry {
             val name = row.operand1
-            val symbol = pass1.symbolTable.find { it.name == name }
-            if (symbol == null) {
+            return pass1.symbolTable.find { it.name == name } ?: run {
                 if (registerNumber(name) != null || parseDecimal(name) != null) {
                     fail(row, "для данного типа адресации операнд должен быть меткой: '$name'")
                 }
                 fail(row, "ошибка в операнде, имя '$name' отсутствует в ТСИ")
             }
+        }
+
+        /**
+         * Относительная адресация: смещение = адрес метки − адрес следующей команды,
+         * в дополнительном коде на 2 байта (длина 3) или 3 байта (длина 4).
+         */
+        private fun resolveOffset(row: AuxTableRow, commandLength: Int): String {
+            val symbol = findSymbol(row)
+            val offset = symbol.address - (row.address + commandLength)
+            val bits = (commandLength - 1) * 8
+            if (offset !in -(1 shl (bits - 1)) until (1 shl (bits - 1))) {
+                fail(row, "смещение до метки '${symbol.name}' не помещается в ${commandLength - 1} байта команды")
+            }
+            return "%0${bits / 4}X".format(offset and ((1 shl bits) - 1))
+        }
+
+        /** Прямая адресация: адрес — 2 байта для длины 3, 3 байта для длины 4. */
+        private fun resolveAddress(row: AuxTableRow, commandLength: Int): String {
+            val name = row.operand1
+            val symbol = findSymbol(row)
             return if (commandLength == 3) {
                 if (symbol.address > 0xFFFF) fail(row, "адрес метки '$name' не помещается в 2 байта команды")
                 "%04X".format(symbol.address)

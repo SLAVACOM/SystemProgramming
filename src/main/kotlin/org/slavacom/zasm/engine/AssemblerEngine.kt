@@ -1,5 +1,6 @@
 package org.slavacom.zasm.engine
 
+import org.slavacom.zasm.model.AddressingMode
 import org.slavacom.zasm.model.OpcodeEntry
 import org.slavacom.zasm.model.SourceLine
 
@@ -13,8 +14,8 @@ class AssemblerEngine {
     val hasPass1Result: Boolean
         get() = lastPass1 != null
 
-    fun runPass1(source: List<SourceLine>, opcodes: List<OpcodeEntry>): Pass1Result {
-        val result = Pass1Engine.run(source, opcodes)
+    fun runPass1(source: List<SourceLine>, opcodes: List<OpcodeEntry>, mode: AddressingMode? = null): Pass1Result {
+        val result = Pass1Engine.run(source, opcodes, mode)
         lastPass1 = result.takeIf { it.isSuccess }
         return result
     }

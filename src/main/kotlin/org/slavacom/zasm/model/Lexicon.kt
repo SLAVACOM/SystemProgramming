@@ -32,3 +32,11 @@ private fun quotedBody(operand: String, prefix: Char): String? {
     if (!operand[0].equals(prefix, ignoreCase = true) || operand[1] != '"' || operand.last() != '"') return null
     return operand.substring(2, operand.length - 1)
 }
+
+/** Имя метки из операнда относительной адресации `[метка]`; null — если операнд не в скобках. */
+fun relativeOperandName(operand: String): String? =
+    if (operand.length >= 2 && operand.first() == '[' && operand.last() == ']') {
+        operand.substring(1, operand.length - 1)
+    } else {
+        null
+    }

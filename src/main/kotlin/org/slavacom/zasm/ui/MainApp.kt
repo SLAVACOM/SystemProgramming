@@ -12,7 +12,9 @@ import javafx.scene.control.ComboBox
 import javafx.scene.control.Label
 import javafx.scene.control.ListCell
 import javafx.scene.control.ListView
+import javafx.scene.control.RadioButton
 import javafx.scene.control.TextArea
+import javafx.scene.control.ToggleGroup
 import javafx.scene.control.Tooltip
 import javafx.scene.layout.BorderPane
 import javafx.scene.layout.ColumnConstraints
@@ -26,6 +28,7 @@ import javafx.scene.text.Font
 import javafx.stage.Stage
 import org.slavacom.zasm.engine.AssemblerEngine
 import org.slavacom.zasm.engine.Pass1Engine
+import org.slavacom.zasm.model.AddressingMode
 import org.slavacom.zasm.model.AssemblerError
 import org.slavacom.zasm.model.DefaultOpcodeTable
 import org.slavacom.zasm.model.OpcodeEntry
@@ -36,16 +39,18 @@ import org.slavacom.zasm.model.toHex2
 import org.slavacom.zasm.model.toHex6
 import org.slavacom.zasm.model.validateOpcodeTable
 import org.slavacom.zasm.samples.AssemblerSample
-import org.slavacom.zasm.samples.Stage1Samples
+import org.slavacom.zasm.samples.Stage2Samples
 
 private const val MESSAGE_LIST_HEIGHT = 110.0
+private const val RELOCATION_LIST_HEIGHT = 140.0
 
 /**
- * Этап 1: двухпросмотровый ассемблер для программы в абсолютном формате.
+ * Этап 2: двухпросмотровый ассемблер для программы в перемещаемом формате.
  * Три колонки (исходные данные | результаты первого прохода | результаты
- * второго прохода) и кнопки проходов внизу. Любая правка исходного текста
- * или ТКО сбрасывает результаты — второй проход возможен только после
- * успешного первого по актуальным данным.
+ * второго прохода) и кнопки проходов внизу. Программа ассемблируется в одном
+ * из режимов «только прямая» / «только относительная» адресация. Любая правка
+ * исходного текста или ТКО и смена режима сбрасывают результаты — второй
+ * проход возможен только после успешного первого по актуальным данным.
  */
 class MainApp : Application() {
 
@@ -54,6 +59,7 @@ class MainApp : Application() {
     private lateinit var firstPassButton: Button
     private lateinit var secondPassButton: Button
     private lateinit var exampleBox: ComboBox<AssemblerSample>
+    private val modeGroup = ToggleGroup()
 
     private lateinit var sourceTextArea: TextArea
     private lateinit var opcodeGrid: StringGrid
@@ -62,6 +68,7 @@ class MainApp : Application() {
     private lateinit var symbolGrid: StringGrid
     private lateinit var errors1List: ListView<String>
 
+    private lateinit var relocationList: ListView<String>
     private lateinit var binaryCodeList: ListView<String>
     private lateinit var errors2List: ListView<String>
 
@@ -72,12 +79,12 @@ class MainApp : Application() {
             bottom = buildPassButtons()
         }
 
-        loadSample(Stage1Samples.default)
+        loadSample(Stage2Samples.direct)
 
         val scene = Scene(root, 1400.0, 900.0)
         scene.stylesheets.add(javaClass.getResource("/zasm.css")!!.toExternalForm())
 
-        stage.title = "Zasm 1.0 — Двухпросмотровый ассемблер для программы в абсолютном формате"
+        stage.title = "Zasm 2.0 — Двухпросмотровый ассемблер для программы в перемещаемом формате"
         stage.scene = scene
         stage.show()
     }
@@ -85,12 +92,28 @@ class MainApp : Application() {
     // ------------------------------------------------------------- layout
 
     private fun buildToolbar(): HBox {
+        val modeButtons = AddressingMode.entries.map { mode ->
+            RadioButton(mode.title).apply {
+                toggleGroup = modeGroup
+                userData = mode
+            }
+        }
+        modeGroup.selectToggle(modeButtons.first())
+        modeGroup.selectedToggleProperty().addListener { _, _, _ -> invalidatePasses() }
+
         exampleBox = ComboBox<AssemblerSample>().apply {
-            items.addAll(Stage1Samples.all)
+            items.addAll(Stage2Samples.all)
             selectionModel.selectFirst()
             setOnAction { selectionModel.selectedItem?.let { loadSample(it) } }
         }
-        return HBox(10.0, Region().apply { HBox.setHgrow(this, Priority.ALWAYS) }, Label("Выбор примера:"), exampleBox).apply {
+        return HBox(
+            10.0,
+            Label("Режим:"),
+            *modeButtons.toTypedArray(),
+            Region().apply { HBox.setHgrow(this, Priority.ALWAYS) },
+            Label("Выбор примера:"),
+            exampleBox,
+        ).apply {
             padding = Insets(8.0, 10.0, 0.0, 10.0)
             alignment = Pos.CENTER_LEFT
         }
@@ -205,12 +228,18 @@ class MainApp : Application() {
     }
 
     private fun buildPass2Column(): VBox {
+        relocationList = ListView<String>().apply {
+            styleClass += "monospace-list"
+            minHeight = RELOCATION_LIST_HEIGHT
+            prefHeight = RELOCATION_LIST_HEIGHT
+        }
         binaryCodeList = ListView<String>().apply { styleClass += "monospace-list" }
         errors2List = messageList()
 
         VBox.setVgrow(binaryCodeList, Priority.ALWAYS)
 
         return column(
+            title("Таблица настройки"), relocationList,
             title("Двоичный код"), binaryCodeList,
             title("Ошибки второго прохода"), errors2List,
         )
@@ -218,7 +247,11 @@ class MainApp : Application() {
 
     // ----------------------------------------------------------- handlers
 
+    private val selectedMode: AddressingMode
+        get() = modeGroup.selectedToggle.userData as AddressingMode
+
     private fun loadSample(sample: AssemblerSample) {
+        sample.mode?.let { mode -> modeGroup.selectToggle(modeGroup.toggles.first { it.userData == mode }) }
         sourceTextArea.text = formatSourceText(sample.lines)
         invalidatePasses()
     }
@@ -233,6 +266,7 @@ class MainApp : Application() {
         auxGrid.clearDataRows(0)
         symbolGrid.clearDataRows(0)
         errors1List.items.clear()
+        relocationList.items.clear()
         binaryCodeList.items.clear()
         errors2List.items.clear()
         secondPassButton.isDisable = true
@@ -270,7 +304,7 @@ class MainApp : Application() {
     private fun onCheckSyntax() {
         invalidatePasses()
         val opcodes = readOpcodes() ?: return
-        val result = Pass1Engine.run(readSource(), opcodes)
+        val result = Pass1Engine.run(readSource(), opcodes, selectedMode)
         errors1List.items.setAll(
             if (result.isSuccess) listOf("Ошибок не найдено.") + messages(result.warnings) else messages(result.errors),
         )
@@ -280,7 +314,7 @@ class MainApp : Application() {
         invalidatePasses()
         val opcodes = readOpcodes() ?: return
 
-        val result = engine.runPass1(readSource(), opcodes)
+        val result = engine.runPass1(readSource(), opcodes, selectedMode)
 
         auxGrid.loadRows(result.auxTable.map { row ->
             val address = if (row.opText == "START") result.programName else toHex6(row.address)
@@ -295,6 +329,7 @@ class MainApp : Application() {
     private fun onSecondPass() {
         if (!engine.hasPass1Result) return
         val result = engine.runPass2()
+        relocationList.items.setAll(result.relocations.map(::toHex6))
         binaryCodeList.items.setAll(result.records)
         errors2List.items.setAll(messages(result.errors))
     }
